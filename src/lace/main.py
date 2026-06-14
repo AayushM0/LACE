@@ -677,7 +677,96 @@ def memory_review(
         typer.Option("--limit", "-n", help="Max memories to review."),
     ] = 20,
 ) -> None:
-    """Interactively review low-confidence or stale memories."""
+    """
+    Interactive review of unverified inbox items and low-confidence memories.
+    
+    Shows inbox items first (auto-extracted, unverified), then existing
+    low-confidence vault memories. This is the primary moderation interface
+    for the auto-extraction pipeline.
+    """
+    from lace.memory.inbox import list_inbox, promote_to_vault, purge_from_inbox
+    
+    inbox_items = list_inbox()
+    
+    # --- Phase 1: Inbox review ---
+    if inbox_items:
+        typer.echo(f"\n{'='*60}")
+        typer.echo(f"  INBOX — {len(inbox_items)} unverified auto-extracted draft(s)")
+        typer.echo(f"{'='*60}\n")
+        
+        reviewed_count = 0
+        for item in inbox_items:
+            if reviewed_count >= limit:
+                remaining = len(inbox_items) - reviewed_count
+                typer.echo(f"\n[{remaining} more inbox items — run again to continue]")
+                break
+            
+            # Display the draft with clear UNVERIFIED label
+            typer.echo(f"[UNVERIFIED DRAFT] {item.id}")
+            typer.echo(f"  Summary:    {item.summary or '(no summary)'}")
+            typer.echo(f"  Category:   {item.category.value if hasattr(item.category, 'value') else item.category}")
+            typer.echo(f"  Scope:      {item.project_scope}")
+            typer.echo(f"  Tags:       {', '.join(item.tags) if item.tags else '(none)'}")
+            typer.echo(f"  Confidence: {item.confidence:.2f} (unverified)")
+            typer.echo(f"\n  Content:\n  {'-'*40}")
+            
+            # Truncate long content for display
+            content_preview = item.content
+            if len(content_preview) > 400:
+                content_preview = content_preview[:400] + "\n  ...[truncated]"
+            for line in content_preview.splitlines():
+                typer.echo(f"  {line}")
+            
+            typer.echo(f"  {'-'*40}\n")
+            
+            # Prompt user for action
+            action = typer.prompt(
+                "Action",
+                default="s",
+                prompt_suffix=" [p=promote / d=discard / s=skip]: ",
+            ).strip().lower()
+            
+            if action in ("p", "promote"):
+                try:
+                    vault_id = promote_to_vault(item.id)
+                    typer.echo(
+                        typer.style(
+                            f"  ✓ Promoted to vault: {vault_id}",
+                            fg=typer.colors.GREEN,
+                        )
+                    )
+                except Exception as e:
+                    typer.echo(
+                        typer.style(f"  ✗ Promotion failed: {e}", fg=typer.colors.RED)
+                    )
+            
+            elif action in ("d", "discard"):
+                try:
+                    purge_from_inbox(item.id)
+                    typer.echo(
+                        typer.style(f"  ✓ Discarded: {item.id}", fg=typer.colors.YELLOW)
+                    )
+                except Exception as e:
+                    typer.echo(
+                        typer.style(f"  ✗ Discard failed: {e}", fg=typer.colors.RED)
+                    )
+            
+            else:  # skip
+                typer.echo("  → Skipped\n")
+            
+            reviewed_count += 1
+            typer.echo()
+    
+    else:
+        typer.echo("\n[Inbox is empty — no auto-extracted drafts pending review]\n")
+    
+    # --- Phase 2: Existing low-confidence vault review ---
+    # This is the original review logic, unchanged.
+    # It runs after inbox review so users see the most urgent items first.
+    typer.echo(f"\n{'='*60}")
+    typer.echo("  VAULT — Low-confidence memory review")
+    typer.echo(f"{'='*60}\n")
+    
     store = _get_store()
     candidates = store.get_review_candidates(limit=limit)
 

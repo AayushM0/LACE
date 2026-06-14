@@ -66,8 +66,28 @@ class MemoryStore:
         source: str | MemorySource = MemorySource.MANUAL,
         confidence: float = 0.8,
         summary: str | None = None,
+        draft: bool = False,  # NEW: routes to inbox instead of vault
     ) -> MemoryObject:
         """Create and persist a new memory with embedding."""
+        if draft:
+            # Route to inbox — do not touch ChromaDB or vault
+            from lace.memory.inbox import save_to_inbox
+            
+            memory = make_memory(
+                content=content,
+                category=category,
+                tags=tags or [],
+                scope=scope,
+                source=source,
+                confidence=confidence,
+            )
+            if summary:
+                memory.summary = summary
+                
+            draft_id = save_to_inbox(memory)
+            memory.id = draft_id
+            return memory
+
         memory = make_memory(
             content=content,
             category=category,

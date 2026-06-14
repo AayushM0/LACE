@@ -40,6 +40,8 @@ from lace.mcp.tools import (
     forget_memory,
     get_related_concepts,
     set_context,
+    get_relevant_context,
+    process_interaction,
 )
 from lace.mcp.resources import (
     get_patterns_resource,
@@ -47,6 +49,37 @@ from lace.mcp.resources import (
     get_project_context_resource,
     get_debug_log_resource,
 )
+
+
+# NEW: Session history for multi-turn extraction context
+_mcp_session_history: list[dict] = []
+_MAX_HISTORY_TURNS: int = 5
+
+
+def _update_session_history(query: str, response: str) -> None:
+    """
+    Appends the current turn to session history and trims to last N turns.
+    
+    Called by process_interaction before enqueuing.
+    The history snapshot is passed to the queue so the worker has
+    multi-turn context for extraction.
+    
+    Thread safety note: MCP tools run in the main thread (stdio is
+    sequential), so no lock needed here.
+    """
+    global _mcp_session_history
+    from datetime import datetime, timezone
+    
+    _mcp_session_history.append({
+        "query": query,
+        "response": response,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    
+    # Trim to last N turns — we don't need the full history, just enough
+    # context for the extractor to understand multi-turn decisions
+    if len(_mcp_session_history) > _MAX_HISTORY_TURNS:
+        _mcp_session_history = _mcp_session_history[-_MAX_HISTORY_TURNS:]
 
 
 # ── Server setup ──────────────────────────────────────────────────────────────
@@ -237,6 +270,65 @@ def create_server() -> Server:
                     "required": ["concept"],
                 },
             ),
+            types.Tool(
+                name="get_relevant_context",
+                description=(
+                    "ALWAYS call this tool at the start of EVERY conversation turn, "
+                    "BEFORE generating any response. Pass the user's exact message as "
+                    "the query. Returns relevant memories from the LACE vault formatted "
+                    "as markdown. Inject the returned content into your system context "
+                    "before responding — this gives you persistent memory of past "
+                    "decisions, patterns, and debug insights. If nothing relevant is "
+                    "found, returns empty string. Never skip this call."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The user's exact message.",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "description": "auto, global, or project:<name>",
+                            "default": "auto",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            ),
+            types.Tool(
+                name="process_interaction",
+                description=(
+                    "ALWAYS call this tool immediately AFTER generating every response, "
+                    "before the conversation turn ends. Pass the user's original query "
+                    "and your complete response. LACE analyzes the conversation in the "
+                    "background and automatically extracts important decisions, patterns, "
+                    "debug insights, and architectural choices into persistent memory. "
+                    "This call is instant — it never blocks. Do not skip this call even "
+                    "for short responses. Consistent calling builds the memory base that "
+                    "makes get_relevant_context more useful over time."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The user's original query.",
+                        },
+                        "response": {
+                            "type": "string",
+                            "description": "The agent's complete response.",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "description": "auto, global, or project:<name>",
+                            "default": "auto",
+                        },
+                    },
+                    "required": ["query", "response"],
+                },
+            ),
         ]
 
     # ── Tool call handler ─────────────────────────────────────────────────────
@@ -286,6 +378,17 @@ def create_server() -> Server:
                 result = await set_context(
                     working_directory=arguments["working_directory"],
                     project_name=arguments.get("project_name"),
+                )
+            elif name == "get_relevant_context":
+                result = await get_relevant_context(
+                    query=arguments["query"],
+                    scope=arguments.get("scope", "auto"),
+                )
+            elif name == "process_interaction":
+                result = await process_interaction(
+                    query=arguments["query"],
+                    response=arguments["response"],
+                    scope=arguments.get("scope", "auto"),
                 )
             else:
                 result = {"error": f"Unknown tool: {name}"}
@@ -354,6 +457,15 @@ async def run_server(debug: bool = False) -> None:
         logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
     else:
         logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+
+    # Initialize queue DB and start worker thread (daemon)
+    try:
+        from lace.mcp.queue import init_queue_db, start_worker_thread
+        init_queue_db()
+        start_worker_thread()
+        print("[LACE] SQLite queue and background worker initialized.", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[LACE] Warning: could not initialize extraction queue: {e}", file=sys.stderr, flush=True)
 
     # ── Pre-warm embedding model ───────────────────────────────────────────
     # Load the model NOW so the first search isn't slow.

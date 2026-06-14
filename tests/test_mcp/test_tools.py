@@ -133,3 +133,49 @@ async def test_get_project_context_returns_identity(lace_env, monkeypatch):
     assert "scope" in result
     assert isinstance(result["identity"], str)
     assert len(result["identity"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_context(store, lace_env, monkeypatch):
+    """get_relevant_context returns relevant memories as markdown."""
+    monkeypatch.setenv("LACE_HOME", str(lace_env))
+
+    store.add("Always use connection pooling with asyncpg", category="pattern", confidence=0.9)
+
+    from lace.mcp.tools import get_relevant_context
+    result = await get_relevant_context("asyncpg connection pooling", scope="global")
+
+    assert "Context from LACE Memory Vault" in result
+    assert "Always use connection pooling with asyncpg" in result
+    assert "Confidence: 0.90" in result
+
+
+@pytest.mark.asyncio
+async def test_process_interaction(lace_env, monkeypatch):
+    """process_interaction updates session history and enqueues job."""
+    monkeypatch.setenv("LACE_HOME", str(lace_env))
+
+    from lace.mcp.tools import process_interaction
+    from lace.mcp.queue import init_queue_db, get_pending_jobs
+    import lace.mcp.server as mcp_server
+
+    init_queue_db()
+
+    mcp_server._mcp_session_history = []
+
+    res = await process_interaction(
+        query="test query 123",
+        response="test response abc",
+        scope="global",
+    )
+
+    assert res["status"] == "queued"
+    assert res["job_id"] is not None
+
+    assert len(mcp_server._mcp_session_history) == 1
+    assert mcp_server._mcp_session_history[0]["query"] == "test query 123"
+
+    pending = get_pending_jobs()
+    assert len(pending) == 1
+    assert pending[0]["id"] == res["job_id"]
+    assert pending[0]["query"] == "test query 123"

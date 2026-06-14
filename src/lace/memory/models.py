@@ -17,6 +17,7 @@ class MemorySource(str, Enum):
     MANUAL          = "manual"
     INGESTION       = "ingestion"
     MCP             = "mcp"
+    AUTO_EXTRACTED  = "auto_extracted"
 
 
 class MemoryCategory(str, Enum):

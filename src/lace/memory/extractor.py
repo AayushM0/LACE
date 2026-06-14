@@ -80,15 +80,18 @@ Maximum 3 extractions per conversation turn.
 Be conservative — most turns should produce 0 extractions."""
 
 
-def _build_extraction_prompt(query: str, response: str) -> str:
+def _build_extraction_prompt(query: str, response: str, context: str = "") -> str:
     """Build the user prompt for extraction."""
-    return (
-        f"Conversation turn to analyze:\n\n"
+    prompt = "Conversation turn to analyze:\n\n"
+    if context:
+        prompt += f"CONVERSATION HISTORY:\n{context}\n\n"
+    prompt += (
         f"USER QUERY:\n{query}\n\n"
         f"ASSISTANT RESPONSE:\n{response}\n\n"
         f"Extract any knowledge worth storing as persistent memories.\n"
         f"Return a JSON array (can be empty [])."
     )
+    return prompt
 
 
 # ── Extraction engine ─────────────────────────────────────────────────────────
@@ -96,11 +99,12 @@ def _build_extraction_prompt(query: str, response: str) -> str:
 def extract_from_conversation(
     query: str,
     response: str,
-    store: "MemoryStore",
+    store: "MemoryStore" | None = None,
     scope: str = "global",
     max_extractions: int = 3,
     require_confirmation: bool = False,
     provider=None,
+    context: str = "",
 ) -> ExtractionResult:
     # Never store extracted memories under a session scope
     # Sessions are ephemeral — extracted knowledge should persist
@@ -128,7 +132,7 @@ def extract_from_conversation(
     try:
         raw = provider.complete(
             system_prompt=EXTRACTION_SYSTEM_PROMPT,
-            user_message=_build_extraction_prompt(query, response),
+            user_message=_build_extraction_prompt(query, response, context),
         )
     except Exception as e:
         return ExtractionResult(
@@ -145,8 +149,8 @@ def extract_from_conversation(
             skipped=0, error=None,
         )
 
-    # Step 4 — If confirmation required, return without storing
-    if require_confirmation:
+    # Step 4 — If confirmation required or store is None, return without storing
+    if require_confirmation or store is None:
         return ExtractionResult(
             candidates=candidates,
             stored=[],

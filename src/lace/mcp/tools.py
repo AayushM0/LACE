@@ -3,7 +3,10 @@
 from __future__ import annotations
 import sys
 import asyncio
+import logging
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 from lace.core.config import get_lace_home, load_config
 from lace.core.scope import get_active_scope, get_projects
@@ -526,3 +529,149 @@ async def get_related_concepts(
         }
         for node in related[:20]
     ]
+
+
+async def get_relevant_context(
+    query: str,
+    scope: str = "auto",
+    **kwargs
+) -> str:
+    """
+    Retrieves memories relevant to the user's query and formats them
+    as a markdown block ready to inject into the agent's system prompt.
+    """
+    from lace.memory.store import MemoryStore
+    from lace.core.config import get_lace_home, load_config
+    
+    # Configuration and store setup
+    store, resolved_scope = _get_store(scope)
+    
+    # Semantic search using existing infrastructure.
+    try:
+        results = store.search(
+            query=query,
+            scope=resolved_scope,
+            max_results=10,
+        )
+    except Exception as e:
+        logger.error(f"get_relevant_context: search failed: {e}")
+        return ""
+    
+    if not results:
+        return ""
+    
+    # Apply relevance threshold.
+    RELEVANCE_THRESHOLD = 0.45
+    filtered = [r for r in results if r.relevance_score >= RELEVANCE_THRESHOLD]
+    
+    if not filtered:
+        logger.debug(
+            f"get_relevant_context: {len(results)} results found but none "
+            f"passed threshold {RELEVANCE_THRESHOLD}"
+        )
+        return ""
+    
+    # Build the markdown output with a token budget.
+    TOKEN_BUDGET = 2000
+    MAX_INDIVIDUAL_MEMORY_TOKENS = 800
+    
+    output_lines: list[str] = ["## Context from LACE Memory Vault\n"]
+    tokens_used = 0
+    injected_count = 0
+    
+    for i, result in enumerate(filtered):
+        memory = result.memory
+        memory_text = memory.content or ""
+        
+        estimated_tokens = len(memory_text.split()) * 1.3
+        
+        if estimated_tokens > MAX_INDIVIDUAL_MEMORY_TOKENS:
+            word_limit = int(MAX_INDIVIDUAL_MEMORY_TOKENS / 1.3)
+            words = memory_text.split()[:word_limit]
+            memory_text = " ".join(words) + " [truncated...]"
+            estimated_tokens = MAX_INDIVIDUAL_MEMORY_TOKENS
+        
+        if tokens_used + estimated_tokens > TOKEN_BUDGET:
+            logger.debug(
+                f"get_relevant_context: token budget reached after "
+                f"{injected_count} memories"
+            )
+            break
+        
+        summary = memory.summary or "(no summary)"
+        confidence = getattr(memory, "confidence", 0.0)
+        
+        output_lines.append(
+            f"[{i+1}] {summary} "
+            f"(ID: {memory.id}, "
+            f"Confidence: {confidence:.2f})\n"
+            f"{memory_text}\n"
+        )
+        
+        tokens_used += estimated_tokens
+        injected_count += 1
+    
+    if injected_count == 0:
+        return ""
+    
+    # Update access signals for injected memories.
+    for result in filtered[:injected_count]:
+        try:
+            if hasattr(result.memory, "touch"):
+                result.memory.touch()
+                store.save(result.memory)
+        except Exception as e:
+            logger.debug(f"get_relevant_context: touch failed for {result.memory.id}: {e}")
+    
+    output = "\n".join(output_lines)
+    logger.info(
+        f"get_relevant_context: injecting {injected_count} memories "
+        f"(~{int(tokens_used)} tokens) for query: {query[:60]}..."
+    )
+    
+    return output
+
+
+async def process_interaction(
+    query: str,
+    response: str,
+    scope: str = "auto",
+    **kwargs
+) -> dict:
+    """
+    Queues a conversation turn for background extraction analysis.
+    """
+    from lace.mcp.queue import enqueue
+    import lace.mcp.server as mcp_server
+    
+    # Update session history first
+    mcp_server._update_session_history(query, response)
+    
+    # Take snapshot
+    history_snapshot = list(mcp_server._mcp_session_history)
+    
+    # Resolve scope
+    _, resolved_scope = _get_store(scope)
+    
+    try:
+        job_id = enqueue(
+            query=query,
+            response=response,
+            scope=resolved_scope,
+            history=history_snapshot,
+        )
+        
+        logger.debug(f"process_interaction: queued job {job_id}")
+        
+        return {
+            "status": "queued",
+            "job_id": job_id,
+            "message": "Extraction queued in background. Results appear in inbox after ~30 seconds.",
+        }
+    except Exception as e:
+        logger.error(f"process_interaction: enqueue failed: {e}")
+        return {
+            "status": "error",
+            "job_id": None,
+            "message": f"Queue unavailable: {e}",
+        }

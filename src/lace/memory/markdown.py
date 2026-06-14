@@ -93,6 +93,12 @@ def save_memory_to_file(memory: MemoryObject, vault_path: Path) -> Path:
     return file_path
 
 
+def write_memory_markdown(memory: MemoryObject, file_path: Path) -> None:
+    """Write a MemoryObject as a markdown string with frontmatter directly to a file."""
+    file_path.write_text(memory_to_markdown(memory), encoding="utf-8")
+    memory.file_path = str(file_path)
+
+
 # ── Read ──────────────────────────────────────────────────────────────────────
 
 def markdown_to_memory(file_path: Path) -> MemoryObject | None:
