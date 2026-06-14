@@ -18,6 +18,8 @@ warnings.filterwarnings("ignore")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 
 import logging
@@ -37,6 +39,7 @@ from lace.mcp.tools import (
     list_memories,
     forget_memory,
     get_related_concepts,
+    set_context,
 )
 from lace.mcp.resources import (
     get_patterns_resource,
@@ -185,6 +188,28 @@ def create_server() -> Server:
                 },
             ),
             types.Tool(
+                name="set_context",
+                description=(
+                    "Set the current working directory context for LACE. "
+                    "Call this when switching to a different project folder. "
+                    "Affects scope resolution for future remember/search calls."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "working_directory": {
+                            "type": "string",
+                            "description": "Absolute path to the current working directory",
+                        },
+                        "project_name": {
+                            "type": "string",
+                            "description": "Optional explicit project name (overrides git detection)",
+                        },
+                    },
+                    "required": ["working_directory"],
+                },
+            ),
+            types.Tool(
                 name="get_related_concepts",
                 description=(
                     "Find concepts and memories related to a given concept "
@@ -257,6 +282,11 @@ def create_server() -> Server:
                     depth=arguments.get("depth", 2),
                     memories_only=arguments.get("memories_only", False),
                 )
+            elif name == "set_context":
+                result = await set_context(
+                    working_directory=arguments["working_directory"],
+                    project_name=arguments.get("project_name"),
+                )
             else:
                 result = {"error": f"Unknown tool: {name}"}
 
@@ -324,6 +354,20 @@ async def run_server(debug: bool = False) -> None:
         logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
     else:
         logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+
+    # ── Pre-warm embedding model ───────────────────────────────────────────
+    # Load the model NOW so the first search isn't slow.
+    # This runs once at server startup, takes ~1s, then every search is fast.
+    try:
+        from lace.core.config import load_config, get_lace_home
+        from lace.retrieval.embeddings import get_model
+        config = load_config(get_lace_home())
+        model_name = config.embeddings.model
+        print(f"[LACE] Pre-warming embedding model: {model_name}", file=sys.stderr, flush=True)
+        get_model(model_name)
+        print("[LACE] Embedding model ready.", file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"[LACE] Warning: could not pre-warm model: {e}", file=sys.stderr, flush=True)
 
     server = create_server()
 

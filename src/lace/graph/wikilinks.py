@@ -22,47 +22,91 @@ def extract_existing_wikilinks(content: str) -> Set[str]:
     return set(matches)
 
 
-def get_related_concepts_for_memory(
+def get_high_value_concepts(
     memory_id: str,
     graph,
-    include_memory_links: bool = False,
+    max_links: int = 5,
 ) -> list[str]:
-    """Get all concepts related to a memory node via the knowledge graph.
+    """Get the most valuable concepts to link for a memory.
     
-    Args:
-        memory_id: The memory node ID
-        graph: NetworkX DiGraph
-        include_memory_links: If True, also return related memory IDs
-        
-    Returns:
-        List of concept names (and optionally memory IDs) to link
+    Strategy:
+    1. Direct tags (already linked via tagged_with edges) — SKIP (already in frontmatter)
+    2. Concepts with strong co-occurrence (weight > 2)
+    3. Concepts linked from related memories (2-hop traversal)
+    
+    Filters out:
+    - Generic/common concepts (appear in >50% of memories)
+    - Single-letter concepts
+    - Concepts identical to existing tags
+    
+    Returns top N by relevance score.
     """
     if memory_id not in graph:
         return []
     
-    related = []
-    visited = {memory_id}
-    
-    # Direct outgoing edges (tags and links)
+    # Get memory's direct tags (skip these — already in frontmatter)
+    direct_tags = set()
     for target in graph.successors(memory_id):
-        target_data = graph.nodes[target]
-        if target_data.get("type") == "concept":
-            related.append(target)
-            visited.add(target)
+        edge_data = graph.get_edge_data(memory_id, target)
+        if edge_data and edge_data.get("relation") == "tagged_with":
+            direct_tags.add(target)
     
-    # Co-occurring concepts (via other memories)
-    for target in graph.successors(memory_id):
-        if target in visited:
+    # Collect candidate concepts with scores
+    candidates = {}
+    
+    # Strategy 1: Strong co-occurrence (concepts that frequently appear together)
+    for concept in graph.nodes():
+        if graph.nodes[concept].get("type") != "concept":
             continue
-        if graph.nodes[target].get("type") == "concept":
-            # Find other memories that share this concept
-            for other_memory in graph.predecessors(target):
-                if (other_memory != memory_id and 
-                    graph.nodes[other_memory].get("type") == "memory"):
-                    related.append(other_memory)
-                    visited.add(other_memory)
+        if concept in direct_tags:
+            continue  # Skip tags
+        
+        # Check if this concept co-occurs with our memory's concepts
+        for direct_tag in direct_tags:
+            if graph.has_edge(direct_tag, concept):
+                edge_data = graph.get_edge_data(direct_tag, concept)
+                if edge_data.get("relation") == "co_occurs":
+                    weight = edge_data.get("weight", 1)
+                    if weight >= 2:  # Only strong co-occurrence
+                        candidates[concept] = candidates.get(concept, 0) + weight
     
-    return sorted(list(set(related)))
+    # Strategy 2: 2-hop concepts (concepts from related memories)
+    # Find memories that share tags with this memory
+    related_memories = set()
+    for tag in direct_tags:
+        for pred in graph.predecessors(tag):
+            if (graph.nodes[pred].get("type") == "memory" and 
+                pred != memory_id):
+                related_memories.add(pred)
+    
+    # Get concepts from those related memories
+    for related_mem in related_memories:
+        for concept in graph.successors(related_mem):
+            if graph.nodes[concept].get("type") == "concept":
+                if concept not in direct_tags:
+                    # Boost score if multiple related memories share this concept
+                    candidates[concept] = candidates.get(concept, 0) + 0.5
+    
+    # Filter out noise
+    filtered = {}
+    total_memories = sum(1 for n in graph.nodes() if graph.nodes[n].get("type") == "memory")
+    
+    for concept, score in candidates.items():
+        # Skip single-letter or very short concepts
+        if len(concept) <= 2:
+            continue
+        
+        # Skip overly common concepts (appear in >50% of memories)
+        concept_freq = sum(1 for pred in graph.predecessors(concept) 
+                          if graph.nodes[pred].get("type") == "memory")
+        if total_memories > 0 and concept_freq / total_memories > 0.5:
+            continue
+        
+        filtered[concept] = score
+    
+    # Return top N by score
+    sorted_concepts = sorted(filtered.items(), key=lambda x: x[1], reverse=True)
+    return [concept for concept, score in sorted_concepts[:max_links]]
 
 
 def inject_wikilinks_into_memory(
@@ -70,22 +114,13 @@ def inject_wikilinks_into_memory(
     graph,
     markdown_path: Path,
 ) -> bool:
-    """Inject wikilinks into a memory markdown file.
+    """Inject high-value wikilinks into a memory markdown file.
     
-    Adds [[concept]] links for:
-    - All tags (already in tags field, but adds wikilinks)
-    - All tagged concepts from graph
-    - Related concepts via co-occurrence
+    Only adds links for:
+    - Concepts with strong co-occurrence (not just tags)
+    - Concepts from related memories
     
-    Preserves existing wikilinks.
-    
-    Args:
-        memory: MemoryObject
-        graph: NetworkX graph
-        markdown_path: Path to the .md file
-        
-    Returns:
-        True if file was modified, False otherwise
+    Does NOT duplicate tags as wikilinks (tags are already in frontmatter).
     """
     if not markdown_path.exists():
         logger.warning(f"File not found: {markdown_path}")
@@ -106,33 +141,28 @@ def inject_wikilinks_into_memory(
         frontmatter = ""
         body = content
     
-    # Extract existing wikilinks to preserve them
-    existing_links = extract_existing_wikilinks(body)
+    # Get high-value concepts (NOT just tags)
+    related = get_high_value_concepts(memory.id, graph, max_links=5)
     
-    # Get related concepts from graph
-    related = get_related_concepts_for_memory(memory.id, graph)
-    
-    # Build wikilinks section
-    wikilinks = set()
-    
-    # Add tag-based wikilinks
-    for tag in memory.tags:
-        wikilinks.add(f"[[{tag}]]")
-    
-    # Add graph-derived wikilinks
-    for concept in related:
-        if concept not in memory.tags:  # Avoid duplication
-            wikilinks.add(f"[[{concept}]]")
-    
-    # Preserve existing wikilinks
-    for link in existing_links:
-        wikilinks.add(f"[[{link}]]")
-    
-    if not wikilinks:
-        return False  # Nothing to add
+    if not related:
+        # Remove existing **Related:** section if no valuable links
+        if "**Related:**" in body:
+            import re
+            pattern = r"\n\*\*Related:\*\*.*?(?=\n\n|$)"
+            new_body = re.sub(pattern, "", body, flags=re.DOTALL).rstrip()
+            if frontmatter:
+                new_content = f"---{frontmatter}---\n{new_body}"
+            else:
+                new_content = new_body
+            
+            if new_content != original_content:
+                markdown_path.write_text(new_content, encoding="utf-8")
+                logger.info(f"Removed low-value wikilinks from: {markdown_path.name}")
+                return True
+        return False
     
     # Create wikilinks section
-    wikilinks_text = "\n\n**Related:**\n" + " ".join(sorted(wikilinks))
+    wikilinks_text = "\n\n**Related:**\n" + " ".join([f"[[{c}]]" for c in related])
     
     # Check if wikilinks section already exists
     if "**Related:**" in body:

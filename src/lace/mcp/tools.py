@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 import sys
+import asyncio
+from datetime import datetime, timezone
 
 from lace.core.config import get_lace_home, load_config
 from lace.core.scope import get_active_scope, get_projects
 from lace.memory.models import MemoryCategory
 from lace.memory.store import MemoryStore
 
-
 def _debug_log(msg: str) -> None:
     """Debug logging to stderr (MCP uses stdout for JSON-RPC)."""
     print(f"[LACE DEBUG] {msg}", file=sys.stderr, flush=True)
+
+
+# ── Context state (set by set_context tool) ───────────────────────────────────
+
+_mcp_context_cwd: str | None = None
+_mcp_context_project: str | None = None
 
 
 # ── Store factory ─────────────────────────────────────────────────────────────
@@ -23,7 +30,11 @@ def _get_store(scope: str | None = None) -> tuple[MemoryStore, str]:
     store = MemoryStore(lace_home=lace_home, config=config)
 
     if scope is None or scope == "auto":
-        resolved_scope = get_active_scope(lace_home)
+        # Use MCP context if set, otherwise default to global
+        if _mcp_context_project:
+            resolved_scope = _mcp_context_project
+        else:
+            resolved_scope = "global"
     else:
         resolved_scope = scope
 
@@ -93,32 +104,177 @@ def _multi_scope_search(
     
     return unique_results[:max_results]
 
+def _populate_embeddings(
+    memories: list,
+    lace_home,
+) -> None:
+    """Load embeddings from ChromaDB into memory objects in-place.
+    
+    Memories loaded from markdown files don't have embeddings.
+    This fetches them from ChromaDB so dedup can compare them.
+    """
+    from lace.retrieval.vector import get_client, _scope_to_collection_name
+    from pathlib import Path
+
+    vector_db_path = Path(lace_home) / "memory" / "vector_db"
+    
+    try:
+        client = get_client(vector_db_path)
+    except Exception:
+        return
+
+    # Group memories by scope to minimize ChromaDB calls
+    by_scope: dict[str, list] = {}
+    for m in memories:
+        by_scope.setdefault(m.project_scope, []).append(m)
+
+    for scope, scope_memories in by_scope.items():
+        try:
+            collection_name = _scope_to_collection_name(scope)
+            collection = client.get_collection(collection_name)
+            
+            ids = [m.id for m in scope_memories]
+            result = collection.get(
+                ids=ids,
+                include=["embeddings"],
+            )
+            
+            if not result or not result.get("ids"):
+                continue
+
+            # Check if embeddings exist (don't use if directly on array)
+            embeddings = result.get("embeddings")
+            if embeddings is None or len(embeddings) == 0:  # ← FIX
+                continue
+
+            # Map id → embedding
+            embedding_map = {}
+            for i, mem_id in enumerate(result["ids"]):
+                if i < len(embeddings):
+                    embedding_map[mem_id] = embeddings[i]
+
+            # Assign back to memory objects
+            for m in scope_memories:
+                if m.id in embedding_map:
+                    m.embedding = embedding_map[m.id]
+
+        except Exception as e:
+            import sys
+            print(f"[LACE] _populate_embeddings error for scope {scope}: {e}", file=sys.stderr)
+            continue
+
 
 # ── Tool implementations ──────────────────────────────────────────────────────
+
+async def set_context(
+    working_directory: str,
+    project_name: str | None = None,
+    **kwargs,
+) -> dict:
+    """Set the MCP server's working directory context."""
+    global _mcp_context_cwd, _mcp_context_project
+    from lace.core.scope import detect_current_project
+
+    _mcp_context_cwd = working_directory
+
+    if project_name:
+        _mcp_context_project = f"project:{project_name}"
+    else:
+        # Auto-detect from the provided cwd
+        _mcp_context_project = detect_current_project(cwd=working_directory)
+
+    return {
+        "context_set": True,
+        "working_directory": _mcp_context_cwd,
+        "detected_scope": _mcp_context_project or "global",
+    }
+
 
 async def search_memory(
     query: str,
     scope: str = "auto",
     max_results: int = 5,
     category: str = "all",
-    **kwargs  # Accept any extra args from MCP
+    **kwargs
 ) -> list[dict]:
     """Search your knowledge base for memories relevant to a query."""
+    import time
+    t_start = time.monotonic()
+
     store, resolved_scope = _get_store(scope)
 
-    results = _multi_scope_search(
-        store=store,
-        query=query,
-        primary_scope=resolved_scope,
-        max_results=min(max_results, 20),
-    )
+    # ── Determine which scopes to search ────────────────────────────────────
+    # When scope is "auto" and a project context is set, search both:
+    #   1. global (always)
+    #   2. the active project (if set)
+    # This allows cross-project knowledge while maintaining isolation.
+    
+    scopes_to_search = []
+    
+    if scope == "auto":
+        scopes_to_search.append("global")
+        if _mcp_context_project and _mcp_context_project != "global":
+            scopes_to_search.append(_mcp_context_project)
+    else:
+        # Explicit scope provided
+        scopes_to_search.append(resolved_scope)
+    
+    # ── Search across all target scopes ─────────────────────────────────────
+    all_results = []
+    seen_ids = set()
+    
+    for search_scope in scopes_to_search:
+        scope_results = _multi_scope_search(
+            store=store,
+            query=query,
+            primary_scope=search_scope,
+            max_results=max_results * 2,  # Get more candidates for merging
+        )
+        
+        # Deduplicate across scopes
+        for r in scope_results:
+            if r.memory.id not in seen_ids:
+                seen_ids.add(r.memory.id)
+                all_results.append(r)
+    
+    # ── Re-rank combined results ────────────────────────────────────────────
+    # Sort by relevance score (already computed by _multi_scope_search)
+    all_results.sort(key=lambda r: r.relevance_score, reverse=True)
+    results = all_results[:max_results]
 
+    # ── Apply category filter ───────────────────────────────────────────────
     if category != "all":
         try:
             cat = MemoryCategory(category)
             results = [r for r in results if r.memory.category == cat]
         except ValueError:
             pass
+
+    # ── Record access for each retrieved memory ─────────────────────────────
+    for r in results:
+        try:
+            store.record_access(r.memory.id)
+        except Exception:
+            pass
+
+    # ── Log retrieval ───────────────────────────────────────────────────────
+    try:
+        latency_ms = (time.monotonic() - t_start) * 1000
+        lace_home = get_lace_home()
+        from lace.utils.logging import RetrievalLogger
+        logger = RetrievalLogger(lace_home)
+        
+        # Log the primary scope that was searched
+        log_scope = resolved_scope if scope != "auto" else f"auto({','.join(scopes_to_search)})"
+        
+        logger.log_retrieval(
+            query=query,
+            scope=log_scope,
+            results=results,
+            latency_ms=latency_ms,
+        )
+    except Exception:
+        pass  # Logging must never break search
 
     return [
         {
@@ -185,8 +341,8 @@ async def remember(
 ) -> dict:
     """Store a new memory from this interaction."""
     store, resolved_scope = _get_store(scope)
-    
-    # If resolved to a session, default to global instead (sessions are ephemeral)
+
+    # Sessions are ephemeral — store in global instead
     if resolved_scope.startswith("session:"):
         resolved_scope = "global"
 
@@ -195,6 +351,56 @@ async def remember(
     except ValueError:
         cat = MemoryCategory.PATTERN
 
+    # ── Dedup check before storing ─────────────────────────────────────────
+    try:
+        from lace.memory.dedup import check_duplicate, DedupAction
+        from lace.memory.models import make_memory
+        from lace.retrieval.embeddings import embed_text
+        from lace.retrieval.vector import get_collection
+
+        candidate = make_memory(
+            content=content,
+            category=cat.value,
+            tags=tags or [],
+            scope=resolved_scope,
+            source="mcp",
+            confidence=max(0.0, min(1.0, confidence)),
+        )
+        candidate.embedding = embed_text(content)
+
+        # Load all memories and populate their embeddings from ChromaDB
+        lace_home = get_lace_home()
+        existing_memories = store.list(include_archived=False, limit=500)
+        
+        # Populate embeddings from ChromaDB for each memory
+        _populate_embeddings(existing_memories, lace_home)
+
+        dedup = check_duplicate(candidate, existing_memories)
+
+        if dedup.action == DedupAction.SKIP:
+            return {
+                "stored": False,
+                "status": "duplicate",
+                "reason": "Similar memory already exists",
+                "existing_id": dedup.existing.id if dedup.existing else None,
+            }
+
+        if dedup.action == DedupAction.MERGE and dedup.existing:
+            from lace.memory.dedup import merge_memories
+            merged = merge_memories(dedup.existing, candidate)
+            store.save(merged)
+            return {
+                "stored": True,
+                "status": "merged",
+                "id": merged.id,
+                "scope": merged.project_scope,
+                "category": merged.category.value,
+            }
+
+    except Exception as e:
+        _debug_log(f"Dedup check failed, storing anyway: {e}")
+
+    # ── Store the memory ───────────────────────────────────────────────────
     memory = store.add(
         content=content,
         category=cat,
@@ -203,6 +409,22 @@ async def remember(
         source="mcp",
         confidence=max(0.0, min(1.0, confidence)),
     )
+
+    # ── Log interaction ────────────────────────────────────────────────────
+    try:
+        lace_home = get_lace_home()
+        from lace.utils.logging import RetrievalLogger
+        logger = RetrievalLogger(lace_home)
+        logger.log_interaction(
+            query=content[:200],
+            response_length=len(content),
+            provider="mcp",
+            model="antigravity",
+            memories_used=0,
+            latency_ms=0,
+        )
+    except Exception:
+        pass
 
     return {
         "stored": True,

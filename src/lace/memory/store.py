@@ -125,6 +125,22 @@ class MemoryStore:
             return markdown_to_memory(md_file)
         return None
 
+    def record_access(self, memory_id: str) -> None:
+        """Increment access count and update last_accessed timestamp.
+        
+        Called every time a memory is retrieved via MCP or search.
+        Used for frequency scoring in multi-signal ranking.
+        """
+        from datetime import datetime, timezone
+        
+        memory = self.get(memory_id)
+        if memory is None:
+            return
+        
+        memory.access_count += 1
+        memory.last_accessed = datetime.now(timezone.utc)
+        self.save(memory)
+
     def list(
         self,
         category: str | MemoryCategory | None = None,
