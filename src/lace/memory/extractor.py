@@ -58,9 +58,21 @@ Extract knowledge ONLY if it meets ALL of these criteria:
 3. NON-OBVIOUS — not common knowledge
 4. TECHNICAL — relates to code, architecture, debugging, or decisions
 
-Do NOT extract:
-- Generic programming advice
-- Things already obvious to any developer
+Before extracting, ask these three questions (SPECIFICITY TEST):
+1. Is this specific to THIS project or could it apply to any codebase?
+   If any codebase → DISCARD
+2. Would a developer need to re-explain this to an AI in a future session?
+   If no → DISCARD  
+3. Does this represent an actual decision made or pattern established?
+   If it's just information discussed → DISCARD
+
+NEVER extract the following — discard immediately:
+- Any information about LACE itself, its tools, or how it works
+- File paths, directory paths, or local machine locations
+- Generic documentation that applies to any project universally
+- Information that is freely available in official docs
+- Anything that references "get_relevant_context" or "process_interaction"
+- Duplicate concepts already covered by a previous extraction in this turn
 - Conversational filler
 - Questions without clear answers
 - Temporary context

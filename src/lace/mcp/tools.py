@@ -33,9 +33,13 @@ def _get_store(scope: str | None = None) -> tuple[MemoryStore, str]:
     store = MemoryStore(lace_home=lace_home, config=config)
 
     if scope is None or scope == "auto":
-        # Use MCP context if set, otherwise default to global
+        # Use MCP context if set, otherwise try auto-detecting from cwd, then default to global
         if _mcp_context_project:
             resolved_scope = _mcp_context_project
+        elif _mcp_context_cwd:
+            from lace.core.scope import detect_current_project
+            detected = detect_current_project(_mcp_context_cwd, lace_home)
+            resolved_scope = detected or "global"
         else:
             resolved_scope = "global"
     else:
@@ -185,6 +189,13 @@ async def set_context(
     else:
         # Auto-detect from the provided cwd
         _mcp_context_project = detect_current_project(cwd=working_directory)
+        
+        # Fallback to directory name if no git or config exists
+        if not _mcp_context_project and working_directory:
+            from pathlib import Path
+            dir_name = Path(working_directory).name
+            if dir_name:
+                _mcp_context_project = f"project:{dir_name}"
 
     return {
         "context_set": True,
@@ -675,3 +686,26 @@ async def process_interaction(
             "job_id": None,
             "message": f"Queue unavailable: {e}",
         }
+
+
+async def initialize_lace_session(
+    **kwargs
+) -> dict:
+    """Initialize the LACE session, resolve active project context, and confirm memory tools are active."""
+    global _mcp_context_project, _mcp_context_cwd
+    import os
+    
+    project = _mcp_context_project or "global"
+    cwd = _mcp_context_cwd or os.path.expanduser("~")
+    
+    return {
+        "status": "active",
+        "project": project,
+        "cwd": cwd,
+        "instructions": (
+            "LACE memory is now active. You MUST call "
+            "get_relevant_context before every response and "
+            "process_interaction after every response. "
+            "Start now on the very next user message."
+        )
+    }

@@ -89,3 +89,19 @@ async def get_debug_log_resource() -> str:
         lines.append(f"\n{m.content}\n")
 
     return "\n".join(lines)
+
+
+async def get_instructions_resource() -> str:
+    """Return LACE active memory protocol instructions."""
+    return """# LACE Active Memory Protocol
+
+You are operating with persistent memory via LACE MCP.
+
+MANDATORY BEHAVIOR — every turn, no exceptions:
+1. Call get_relevant_context(query) BEFORE generating any response
+2. Generate your response using the injected context  
+3. Call process_interaction(query, response) AFTER your response
+
+These are not optional. Start from turn 1. 
+Do not wait to be reminded. This is your default operating mode.
+"""

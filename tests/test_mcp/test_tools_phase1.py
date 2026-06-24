@@ -354,3 +354,32 @@ class TestStoreDraftFlag:
             
             # Normal path returns mem_ prefix and stored status
             assert status == "stored"
+
+
+# ---------------------------------------------------------------------------
+# initialize_lace_session and resource instructions tests
+# ---------------------------------------------------------------------------
+
+class TestLaceSessionAndResources:
+    @pytest.mark.asyncio
+    async def test_initialize_lace_session(self):
+        """Test initialize_lace_session tool returns expected keys and active status."""
+        from lace.mcp.tools import initialize_lace_session
+        
+        res = await initialize_lace_session()
+        assert res["status"] == "active"
+        assert "project" in res
+        assert "cwd" in res
+        assert "instructions" in res
+        assert "get_relevant_context" in res["instructions"]
+        assert "process_interaction" in res["instructions"]
+
+    @pytest.mark.asyncio
+    async def test_get_instructions_resource(self):
+        """Test get_instructions_resource returns the memory protocol instructions markdown."""
+        from lace.mcp.resources import get_instructions_resource
+        
+        res = await get_instructions_resource()
+        assert "LACE Active Memory Protocol" in res
+        assert "get_relevant_context" in res
+        assert "process_interaction" in res

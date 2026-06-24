@@ -42,12 +42,14 @@ from lace.mcp.tools import (
     set_context,
     get_relevant_context,
     process_interaction,
+    initialize_lace_session,
 )
 from lace.mcp.resources import (
     get_patterns_resource,
     get_decisions_resource,
     get_project_context_resource,
     get_debug_log_resource,
+    get_instructions_resource,
 )
 
 
@@ -329,6 +331,19 @@ def create_server() -> Server:
                     "required": ["query", "response"],
                 },
             ),
+            types.Tool(
+                name="initialize_lace_session",
+                description=(
+                    "Call this tool AUTOMATICALLY at the start of every new conversation "
+                    "before the user sends any message. This initializes the LACE memory session, "
+                    "sets the active project context, and confirms memory tools are active."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
         ]
 
     # ── Tool call handler ─────────────────────────────────────────────────────
@@ -390,6 +405,8 @@ def create_server() -> Server:
                     response=arguments["response"],
                     scope=arguments.get("scope", "auto"),
                 )
+            elif name == "initialize_lace_session":
+                result = await initialize_lace_session()
             else:
                 result = {"error": f"Unknown tool: {name}"}
 
@@ -430,6 +447,12 @@ def create_server() -> Server:
                 description="Past debugging insights and solutions.",
                 mimeType="text/markdown",
             ),
+            types.Resource(
+                uri="memory://instructions",
+                name="LACE Memory Protocol Instructions",
+                description="Instructions on how to operate with persistent LACE memory via MCP.",
+                mimeType="text/markdown",
+            ),
         ]
 
     @server.read_resource()
@@ -443,6 +466,8 @@ def create_server() -> Server:
             return await get_project_context_resource()
         elif uri_str == "memory://debug-log":
             return await get_debug_log_resource()
+        elif uri_str == "memory://instructions":
+            return await get_instructions_resource()
         else:
             return f"Unknown resource: {uri_str}"
 
@@ -467,19 +492,22 @@ async def run_server(debug: bool = False) -> None:
     except Exception as e:
         print(f"[LACE] Warning: could not initialize extraction queue: {e}", file=sys.stderr, flush=True)
 
-    # ── Pre-warm embedding model ───────────────────────────────────────────
-    # Load the model NOW so the first search isn't slow.
-    # This runs once at server startup, takes ~1s, then every search is fast.
-    try:
-        from lace.core.config import load_config, get_lace_home
-        from lace.retrieval.embeddings import get_model
-        config = load_config(get_lace_home())
-        model_name = config.embeddings.model
-        print(f"[LACE] Pre-warming embedding model: {model_name}", file=sys.stderr, flush=True)
-        get_model(model_name)
-        print("[LACE] Embedding model ready.", file=sys.stderr, flush=True)
-    except Exception as e:
-        print(f"[LACE] Warning: could not pre-warm model: {e}", file=sys.stderr, flush=True)
+    # ── Pre-warm embedding model in background ─────────────────────────────
+    # Load the model in a background thread so the client's handshake doesn't timeout.
+    def pre_warm():
+        try:
+            from lace.core.config import load_config, get_lace_home
+            from lace.retrieval.embeddings import get_model
+            config = load_config(get_lace_home())
+            model_name = config.embeddings.model
+            print(f"[LACE] Pre-warming embedding model: {model_name}", file=sys.stderr, flush=True)
+            get_model(model_name)
+            print("[LACE] Embedding model ready.", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[LACE] Warning: could not pre-warm model: {e}", file=sys.stderr, flush=True)
+
+    import threading
+    threading.Thread(target=pre_warm, daemon=True).start()
 
     server = create_server()
 
