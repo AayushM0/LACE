@@ -26,6 +26,18 @@ _model: "SentenceTransformer | None" = None
 _model_lock = threading.Lock()
 _current_model_name: str | None = None
 
+# Public alias used by the get_embedding_model() API below
+_model_instance = None
+
+
+def get_embedding_model(model_name: str = "all-MiniLM-L6-v2") -> "SentenceTransformer":
+    """Return the cached embedding model (alias for get_model).
+
+    Introduced so callers can use either get_model() or get_embedding_model()
+    interchangeably — both share the same underlying singleton instance.
+    """
+    return get_model(model_name)
+
 
 def get_model(model_name: str = "all-MiniLM-L6-v2") -> "SentenceTransformer":
     """Return the embedding model, loading it if necessary."""

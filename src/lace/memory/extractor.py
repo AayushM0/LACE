@@ -76,6 +76,10 @@ NEVER extract the following — discard immediately:
 - Conversational filler
 - Questions without clear answers
 - Temporary context
+- Anything about the AI stopping, pausing, or changing its behavior
+- Anything describing what the AI assistant did or will do
+- Memories that reference the AI in first or third person
+- Anything not directly related to the active project's technical decisions
 
 Output a JSON array of extractions. Each extraction has:
 {

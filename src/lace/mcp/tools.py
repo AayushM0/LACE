@@ -5,6 +5,7 @@ import sys
 import asyncio
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +21,34 @@ def _debug_log(msg: str) -> None:
 
 # ── Context state (set by set_context tool) ───────────────────────────────────
 
-_mcp_context_cwd: str | None = None
-_mcp_context_project: str | None = None
+def _detect_project_at_startup() -> tuple[str, str]:
+    """Detect git project at MCP server startup — runs exactly once on import.
+
+    Returns (cwd, project_scope) where project_scope is either
+    'project:<name>' or 'global'.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            git_root = result.stdout.strip()
+            project_name = Path(git_root).name
+            return git_root, f"project:{project_name}"
+    except Exception:
+        pass
+    # Fallback: use process cwd
+    import os
+    cwd = os.getcwd()
+    return cwd, f"project:{Path(cwd).name}"
+
+
+_startup_cwd, _startup_project = _detect_project_at_startup()
+_mcp_context_cwd: str = _startup_cwd
+_mcp_context_project: str | None = _startup_project
 
 
 # ── Store factory ─────────────────────────────────────────────────────────────
@@ -654,16 +681,28 @@ async def process_interaction(
     """
     from lace.mcp.queue import enqueue
     import lace.mcp.server as mcp_server
-    
+    global _mcp_context_project
+
     # Update session history first
     mcp_server._update_session_history(query, response)
-    
+
     # Take snapshot
     history_snapshot = list(mcp_server._mcp_session_history)
-    
-    # Resolve scope
-    _, resolved_scope = _get_store(scope)
-    
+
+    # If initialize_lace_session was never called, try to self-heal by
+    # detecting the project from the saved cwd.
+    if not _mcp_context_project and _mcp_context_cwd:
+        try:
+            from lace.core.scope import detect_current_project
+            _mcp_context_project = detect_current_project(_mcp_context_cwd) or \
+                f"project:{Path(_mcp_context_cwd).name}"
+        except Exception:
+            pass
+
+    # _mcp_context_project already stores full 'project:<name>' or None.
+    # Use it directly — do NOT add another 'project:' prefix.
+    resolved_scope = _mcp_context_project or "global"
+
     try:
         job_id = enqueue(
             query=query,
@@ -671,12 +710,13 @@ async def process_interaction(
             scope=resolved_scope,
             history=history_snapshot,
         )
-        
-        logger.debug(f"process_interaction: queued job {job_id}")
-        
+
+        logger.debug(f"process_interaction: queued job {job_id} (scope={resolved_scope})")
+
         return {
             "status": "queued",
             "job_id": job_id,
+            "scope_used": resolved_scope,
             "message": "Extraction queued in background. Results appear in inbox after ~30 seconds.",
         }
     except Exception as e:
@@ -684,28 +724,54 @@ async def process_interaction(
         return {
             "status": "error",
             "job_id": None,
+            "scope_used": resolved_scope,
             "message": f"Queue unavailable: {e}",
         }
 
 
+
 async def initialize_lace_session(
-    **kwargs
+    working_directory: str = "",
+    **kwargs,
 ) -> dict:
-    """Initialize the LACE session, resolve active project context, and confirm memory tools are active."""
+    """Auto-detect active project and initialize session state.
+
+    ALWAYS call this at the start of every conversation before the user
+    sends their first message. Pass the current working directory so LACE
+    can scope memories to the correct project automatically.
+    """
     global _mcp_context_project, _mcp_context_cwd
+    import lace.mcp.server as mcp_server
     import os
-    
-    project = _mcp_context_project or "global"
-    cwd = _mcp_context_cwd or os.path.expanduser("~")
-    
+
+    # Reset session history for this new conversation
+    mcp_server._mcp_session_history.clear()
+
+    # Resolve working directory
+    cwd = working_directory.strip() or os.getcwd()
+    _mcp_context_cwd = cwd
+    cwd_path = Path(cwd)
+
+    # Auto-detect project — returns full 'project:<name>' string
+    try:
+        from lace.core.scope import detect_current_project
+        detected = detect_current_project(cwd_path)
+    except Exception:
+        detected = None
+
+    # Fallback to directory name if git/yaml detection failed
+    if not detected:
+        detected = f"project:{cwd_path.name}" if cwd_path.name else "global"
+
+    _mcp_context_project = detected
+
     return {
-        "status": "active",
-        "project": project,
-        "cwd": cwd,
-        "instructions": (
-            "LACE memory is now active. You MUST call "
-            "get_relevant_context before every response and "
-            "process_interaction after every response. "
-            "Start now on the very next user message."
-        )
+        "status": "initialized",
+        "project": _mcp_context_project,
+        "cwd": _mcp_context_cwd,
+        "message": (
+            f"LACE session active for project: {_mcp_context_project}. "
+            "Call get_relevant_context before every response. "
+            "Call process_interaction after worthy responses."
+        ),
     }

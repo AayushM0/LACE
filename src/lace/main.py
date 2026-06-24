@@ -688,19 +688,32 @@ def memory_review(
     
     inbox_items = list_inbox()
     
+    # Counters for final summary
+    promoted = 0
+    discarded = 0
+    inbox_skipped = 0
+    marked_helpful = 0
+    marked_outdated = 0
+    marked_wrong = 0
+    vault_skipped = 0
+
     # --- Phase 1: Inbox review ---
     if inbox_items:
         typer.echo(f"\n{'='*60}")
         typer.echo(f"  INBOX — {len(inbox_items)} unverified auto-extracted draft(s)")
-        typer.echo(f"{'='*60}\n")
-        
+        typer.echo(f"{'='*60}")
+        typer.echo(
+            f"\nReviewing {len(inbox_items)} items — "
+            "press Enter to accept each one, d/s to discard or skip\n"
+        )
+
         reviewed_count = 0
         for item in inbox_items:
             if reviewed_count >= limit:
                 remaining = len(inbox_items) - reviewed_count
                 typer.echo(f"\n[{remaining} more inbox items — run again to continue]")
                 break
-            
+
             # Display the draft with clear UNVERIFIED label
             typer.echo(f"[UNVERIFIED DRAFT] {item.id}")
             typer.echo(f"  Summary:    {item.summary or '(no summary)'}")
@@ -709,24 +722,23 @@ def memory_review(
             typer.echo(f"  Tags:       {', '.join(item.tags) if item.tags else '(none)'}")
             typer.echo(f"  Confidence: {item.confidence:.2f} (unverified)")
             typer.echo(f"\n  Content:\n  {'-'*40}")
-            
-            # Truncate long content for display
+
             content_preview = item.content
             if len(content_preview) > 400:
                 content_preview = content_preview[:400] + "\n  ...[truncated]"
             for line in content_preview.splitlines():
                 typer.echo(f"  {line}")
-            
+
             typer.echo(f"  {'-'*40}\n")
-            
-            # Prompt user for action
-            action = typer.prompt(
+
+            # Prompt — Enter = promote
+            raw = typer.prompt(
                 "Action",
-                default="s",
-                prompt_suffix=" [p=promote / d=discard / s=skip]: ",
+                default="",
+                prompt_suffix=" [Enter=promote / d=discard / s=skip]: ",
             ).strip().lower()
-            
-            if action in ("p", "promote"):
+
+            if raw in ("", "promote"):
                 try:
                     vault_id = promote_to_vault(item.id)
                     typer.echo(
@@ -735,73 +747,93 @@ def memory_review(
                             fg=typer.colors.GREEN,
                         )
                     )
+                    promoted += 1
                 except Exception as e:
                     typer.echo(
                         typer.style(f"  ✗ Promotion failed: {e}", fg=typer.colors.RED)
                     )
-            
-            elif action in ("d", "discard"):
+
+            elif raw in ("d", "discard"):
                 try:
                     purge_from_inbox(item.id)
                     typer.echo(
                         typer.style(f"  ✓ Discarded: {item.id}", fg=typer.colors.YELLOW)
                     )
+                    discarded += 1
                 except Exception as e:
                     typer.echo(
                         typer.style(f"  ✗ Discard failed: {e}", fg=typer.colors.RED)
                     )
-            
-            else:  # skip
-                typer.echo("  → Skipped\n")
-            
+
+            else:  # s or anything else → skip
+                typer.echo("  → Skipped")
+                inbox_skipped += 1
+
             reviewed_count += 1
             typer.echo()
-    
+
     else:
         typer.echo("\n[Inbox is empty — no auto-extracted drafts pending review]\n")
-    
+
     # --- Phase 2: Existing low-confidence vault review ---
-    # This is the original review logic, unchanged.
-    # It runs after inbox review so users see the most urgent items first.
     typer.echo(f"\n{'='*60}")
     typer.echo("  VAULT — Low-confidence memory review")
     typer.echo(f"{'='*60}\n")
-    
+
     store = _get_store()
     candidates = store.get_review_candidates(limit=limit)
 
     if not candidates:
         console.print("[green]✓[/green] All memories look healthy. Nothing to review.")
-        return
-
-    console.print(
-        f"[bold]Reviewing {len(candidates)} memories[/bold] (low confidence or unaccessed)"
-    )
-
-    reviewed = 0
-    for memory in candidates:
-        console.print("\n" + "─" * 60)
+    else:
         console.print(
-            f"[bold]ID:[/bold] {memory.id}  |  [bold]Conf:[/bold] {memory.confidence:.2f}  |  "
-            f"[bold]Accesses:[/bold] {memory.access_count}"
+            f"\nReviewing {len(candidates)} items — "
+            "press Enter to accept each one, d/s to discard or skip\n"
         )
-        console.print(f"[dim]{memory.content[:120]}{'...' if len(memory.content) > 120 else ''}[/dim]")
+        console.print(
+            f"[bold]Reviewing {len(candidates)} memories[/bold] (low confidence or unaccessed)"
+        )
 
-        action = typer.prompt(
-            "Action (helpful/outdated/wrong/skip)",
-            default="skip",
-            type=str,
-        ).strip().lower()
+        for memory in candidates:
+            console.print("\n" + "─" * 60)
+            console.print(
+                f"[bold]ID:[/bold] {memory.id}  |  [bold]Conf:[/bold] {memory.confidence:.2f}  |  "
+                f"[bold]Accesses:[/bold] {memory.access_count}"
+            )
+            console.print(f"[dim]{memory.content[:120]}{'...' if len(memory.content) > 120 else ''}[/dim]")
 
-        if action in ("helpful", "outdated", "wrong"):
-            store.rate(memory.id, action)
-            reviewed += 1
-        elif action == "skip":
-            continue
-        else:
-            console.print("[yellow]Unknown action, skipping.[/yellow]")
+            # Prompt — Enter = helpful
+            raw = typer.prompt(
+                "Action",
+                default="",
+                prompt_suffix=" [Enter=helpful / o=outdated / w=wrong / s=skip]: ",
+            ).strip().lower()
 
-    console.print(f"\n[green]✓[/green] Reviewed {reviewed}/{len(candidates)} memories.")
+            if raw in ("", "helpful"):
+                store.rate(memory.id, "helpful")
+                typer.echo(typer.style("  ✓ Marked helpful", fg=typer.colors.GREEN))
+                marked_helpful += 1
+            elif raw in ("o", "outdated"):
+                store.rate(memory.id, "outdated")
+                typer.echo(typer.style("  ✓ Marked outdated", fg=typer.colors.YELLOW))
+                marked_outdated += 1
+            elif raw in ("w", "wrong"):
+                store.rate(memory.id, "wrong")
+                typer.echo(typer.style("  ✓ Marked wrong", fg=typer.colors.RED))
+                marked_wrong += 1
+            else:  # s or anything else → skip
+                vault_skipped += 1
+
+    # --- Final summary ---
+    console.print(
+        f"\n[green]✓[/green] Review complete: "
+        f"{promoted} promoted, "
+        f"{discarded} discarded, "
+        f"{marked_helpful} marked helpful, "
+        f"{marked_outdated} marked outdated, "
+        f"{marked_wrong} marked wrong, "
+        f"{inbox_skipped + vault_skipped} skipped"
+    )
 
 # Session commands
 
