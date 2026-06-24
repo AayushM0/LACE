@@ -51,6 +51,17 @@ _mcp_context_cwd: str = _startup_cwd
 _mcp_context_project: str | None = _startup_project
 
 
+TERSE_SIGNALS = [
+    'fix', 'add', 'implement', 'create', 'write', 'make',
+    'update', 'change', 'remove', 'debug', 'error', 'bug',
+    'failing', 'broken', 'issue', 'problem', 'not working',
+    'TypeError', 'AttributeError', 'ImportError', 'ValueError',
+    'Exception', 'traceback', 'crash'
+]
+
+TERSE_QUERY_MAX_WORDS = 10
+
+
 # ── Store factory ─────────────────────────────────────────────────────────────
 
 def _get_store(scope: str | None = None) -> tuple[MemoryStore, str]:
@@ -569,6 +580,45 @@ async def get_related_concepts(
     ]
 
 
+def _is_terse_query(query: str) -> bool:
+    """Returns True if the query is short and imperative enough 
+    to benefit from expansion."""
+    words = query.strip().split()
+    if len(words) > TERSE_QUERY_MAX_WORDS:
+        return False
+    query_lower = query.lower()
+    return any(signal in query_lower for signal in TERSE_SIGNALS)
+
+
+def _expand_query(query: str, history: list[dict]) -> str:
+    """Enriches a terse query with context from recent session 
+    history to improve semantic search recall."""
+    if not history:
+        return query
+
+    # Take last 3 turns only
+    recent_turns = history[-3:]
+    context_terms = []
+
+    for turn in recent_turns:
+        prev_query = turn.get('query', '')
+        prev_response = turn.get('response', '')
+
+        # Take first 150 chars of each to get topic signal
+        # without flooding the embedding
+        if prev_query:
+            context_terms.append(prev_query[:150])
+        if prev_response:
+            context_terms.append(prev_response[:150])
+
+    if not context_terms:
+        return query
+
+    context_blob = ' '.join(context_terms)
+    expanded = f"{query} {context_blob}"
+    return expanded.strip()
+
+
 async def get_relevant_context(
     query: str,
     scope: str = "auto",
@@ -578,6 +628,19 @@ async def get_relevant_context(
     Retrieves memories relevant to the user's query and formats them
     as a markdown block ready to inject into the agent's system prompt.
     """
+    import lace.mcp.server as mcp_server
+    _mcp_session_history = mcp_server._mcp_session_history
+
+    # Expand terse queries using session history context
+    # so short imperative commands find relevant memories
+    search_query = query
+    if _is_terse_query(query) and _mcp_session_history:
+        search_query = _expand_query(query, _mcp_session_history)
+        logger.debug(
+            f"get_relevant_context: expanded terse query "
+            f"'{query[:50]}' → '{search_query[:100]}'"
+        )
+
     from lace.memory.store import MemoryStore
     from lace.core.config import get_lace_home, load_config
     
@@ -587,7 +650,7 @@ async def get_relevant_context(
     # Semantic search using existing infrastructure.
     try:
         results = store.search(
-            query=query,
+            query=search_query,
             scope=resolved_scope,
             max_results=10,
         )
