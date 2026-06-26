@@ -43,6 +43,14 @@ from lace.core.scope import (
 )
 from lace.core.identity import compose_identity
 
+from lace.core.generator import (
+    load_memories_for_generation,
+    synthesize_context,
+    _ask_format_choice,
+    _get_filenames,
+    _get_project_root,
+)
+
 from lace.core.config import (
     get_lace_home,
     init_lace_home,
@@ -86,6 +94,8 @@ def init(
 
     with console.status("[bold green]Initializing LACE...[/bold green]"):
         path, already_existed = init_lace_home(lace_home)
+        from lace.mcp.queue import init_queue_db
+        init_queue_db()
 
     if already_existed:
         console.print(
@@ -1765,6 +1775,124 @@ def ask(
                   f"Model: {llm_provider.model_name} | "
                   f"~{token_estimate} tokens | "
                   f"{total_time}ms total[/dim]")
+
+
+# ── generate-context ──────────────────────────────────────────────────────────
+
+@app.command("generate-context")
+def generate_context(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print output to terminal without writing any file.",
+    ),
+    scope: str = typer.Option(
+        "auto",
+        "--scope", "-s",
+        help="Project scope to generate context for. "
+             "Defaults to auto-detecting from git.",
+    ),
+):
+    """
+    Synthesize vault memories into a project context file.
+    Outputs AGENTS.md, CLAUDE.md, or LACE.context.md 
+    at the project root.
+    """
+    from lace.core.scope import detect_current_project
+    from lace.memory.store import MemoryStore
+
+    # Resolve project scope
+    if scope == "auto":
+        resolved_scope = detect_current_project()
+    else:
+        resolved_scope = scope
+
+    if not resolved_scope or resolved_scope == "global":
+        typer.echo(
+            "✗ No active project detected.\n"
+            "  Run this command from inside a git repository,\n"
+            "  or pass --scope project:yourproject"
+        )
+        raise typer.Exit(1)
+
+    project_name = resolved_scope.replace("project:", "")
+
+    # Load memories
+    store = MemoryStore()
+    typer.echo(f"Loading memories for project: {project_name}")
+
+    grouped = load_memories_for_generation(
+        project_scope=resolved_scope,
+        store=store,
+    )
+
+    total = sum(len(v) for v in grouped.values())
+
+    if total == 0:
+        typer.echo(
+            f"✗ No memories found for {project_name}.\n"
+            "  Have some AI conversations first, then run:\n"
+            "  lace memory review"
+        )
+        raise typer.Exit(1)
+
+    typer.echo(f"Found {total} memories. Synthesizing...")
+
+    # Call LLM synthesis
+    try:
+        content = synthesize_context(grouped, project_name)
+    except Exception as e:
+        typer.echo(f"✗ Synthesis failed: {e}")
+        raise typer.Exit(1)
+
+    # Dry run — print and exit
+    if dry_run:
+        typer.echo("\n" + "─" * 60)
+        typer.echo(content)
+        typer.echo("─" * 60)
+        typer.echo("\n[Dry run — no file written]")
+        return
+
+    # Ask user for format choice
+    format_choice = _ask_format_choice()
+    filenames = _get_filenames(format_choice)
+    project_root = _get_project_root()
+
+    # Check for existing files and warn
+    existing = [
+        f for f in filenames
+        if (project_root / f).exists()
+    ]
+
+    if existing:
+        typer.echo("\n⚠ These files already exist:")
+        for f in existing:
+            typer.echo(f"  {project_root / f}")
+        confirm = typer.confirm(
+            "Overwrite?",
+            default=False,
+        )
+        if not confirm:
+            typer.echo("Aborted.")
+            raise typer.Exit(0)
+
+    # Write files
+    typer.echo("")
+    for filename in filenames:
+        output_path = project_root / filename
+        output_path.write_text(content, encoding="utf-8")
+        typer.echo(f"✓ Written: {output_path}")
+
+    # Print commit suggestion
+    typer.echo(
+        "\nCommit this file to share context with your team:"
+    )
+    for filename in filenames:
+        typer.echo(f"  git add {filename}")
+    typer.echo(
+        "  git commit -m 'chore: update AI context via LACE'"
+    )
+
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

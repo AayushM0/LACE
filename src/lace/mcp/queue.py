@@ -108,11 +108,22 @@ def _get_connection() -> sqlite3.Connection:
     2. No risk of a stale connection state causing silent data corruption
     3. The worker poll interval is 30 seconds — connection overhead is irrelevant
     """
+    db_path = get_queue_db_path()
     conn = sqlite3.connect(
-        str(get_queue_db_path()),
+        str(db_path),
         check_same_thread=False,
         timeout=10.0,  # Wait up to 10 seconds for locks to clear
     )
+    
+    # Always ensure tables and indexes exist. This guarantees LACE recovers
+    # gracefully if the database file is deleted/reset while the server is running.
+    try:
+        conn.execute(_CREATE_TABLE_SQL)
+        conn.execute(_CREATE_INDEX_SQL)
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to auto-initialize queue DB tables: {e}")
+        
     conn.row_factory = sqlite3.Row  # Allow dict-style access: row['id']
     return conn
 
@@ -386,7 +397,7 @@ def _process_single_job(job: dict) -> None:
     saved_count = 0
     for candidate in candidates:
         try:
-            draft_id = save_to_inbox(candidate)
+            draft_id = save_to_inbox(candidate, scope=job["scope"])
             logger.info(f"Job {job_id}: saved draft {draft_id}")
             saved_count += 1
         except Exception as e:

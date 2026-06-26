@@ -55,6 +55,7 @@ def memory_to_markdown(memory: MemoryObject) -> str:
             "lifecycle":     memory.lifecycle.value,
             "confidence":    round(memory.confidence, 4),
             "project_scope": memory.project_scope,
+            "scope": memory.project_scope,
             "tags":          memory.tags,
             "created_at":    _dt_to_str(memory.created_at),
             "last_accessed": _dt_to_str(memory.last_accessed),
@@ -125,7 +126,11 @@ def markdown_to_memory(file_path: Path) -> MemoryObject | None:
             source=MemorySource(meta.get("source", "manual")),
             lifecycle=MemoryLifecycle(meta.get("lifecycle", "captured")),
             confidence=float(meta.get("confidence", 0.8)),
-            project_scope=meta.get("project_scope", "global"),
+            project_scope=(
+                meta.get("project_scope")
+                or meta.get("scope")
+                or "global"
+            ),
             tags=list(meta.get("tags", [])),
             created_at=_str_to_dt(meta.get("created_at")),
             last_accessed=_str_to_dt(meta.get("last_accessed")),
@@ -137,7 +142,7 @@ def markdown_to_memory(file_path: Path) -> MemoryObject | None:
                 k: v for k, v in meta.items()
                 if k not in {
                     "id", "category", "source", "lifecycle", "confidence",
-                    "project_scope", "tags", "created_at", "last_accessed",
+                    "project_scope", "scope", "tags", "created_at", "last_accessed",
                     "access_count", "related_ids", "summary",
                 }
             },

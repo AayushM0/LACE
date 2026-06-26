@@ -65,6 +65,9 @@ def get_model(model_name: str = "all-MiniLM-L6-v2") -> "SentenceTransformer":
             except Exception:
                 pass
 
+            import logging
+            logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+
             from sentence_transformers import SentenceTransformer
             _model = SentenceTransformer(model_name)
             _current_model_name = model_name
