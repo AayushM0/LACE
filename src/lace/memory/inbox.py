@@ -1,7 +1,12 @@
 """
 LACE Inbox — unverified draft memory storage.
 
-The inbox is a staging area for auto-extracted memories. Nothing here
+[DEPRECATED] — This file is kept for backwards compatibility but is no 
+longer used by the queue worker. New auto-extracted memories are sent
+directly to the vault with a low confidence score, and reviewed via 
+`lace memory review`.
+
+The inbox was a staging area for auto-extracted memories. Nothing here
 is in ChromaDB. Nothing here affects existing search results. Users
 review and promote (or purge) via `lace memory review`.
 

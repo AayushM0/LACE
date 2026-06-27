@@ -688,104 +688,18 @@ def memory_review(
     ] = 20,
 ) -> None:
     """
-    Interactive review of unverified inbox items and low-confidence memories.
-    
-    Shows inbox items first (auto-extracted, unverified), then existing
-    low-confidence vault memories. This is the primary moderation interface
-    for the auto-extraction pipeline.
+    Interactive review of low-confidence vault memories.
+
+    Auto-extracted memories start at confidence 0.4 and appear here
+    until they earn higher confidence through use (record_access) or
+    explicit rating. Rate them helpful/outdated/wrong to adjust confidence.
     """
-    from lace.memory.inbox import list_inbox, promote_to_vault, purge_from_inbox
-    
-    inbox_items = list_inbox()
-    
     # Counters for final summary
-    promoted = 0
-    discarded = 0
-    inbox_skipped = 0
     marked_helpful = 0
     marked_outdated = 0
     marked_wrong = 0
     vault_skipped = 0
 
-    # --- Phase 1: Inbox review ---
-    if inbox_items:
-        typer.echo(f"\n{'='*60}")
-        typer.echo(f"  INBOX — {len(inbox_items)} unverified auto-extracted draft(s)")
-        typer.echo(f"{'='*60}")
-        typer.echo(
-            f"\nReviewing {len(inbox_items)} items — "
-            "press Enter to accept each one, d/s to discard or skip\n"
-        )
-
-        reviewed_count = 0
-        for item in inbox_items:
-            if reviewed_count >= limit:
-                remaining = len(inbox_items) - reviewed_count
-                typer.echo(f"\n[{remaining} more inbox items — run again to continue]")
-                break
-
-            # Display the draft with clear UNVERIFIED label
-            typer.echo(f"[UNVERIFIED DRAFT] {item.id}")
-            typer.echo(f"  Summary:    {item.summary or '(no summary)'}")
-            typer.echo(f"  Category:   {item.category.value if hasattr(item.category, 'value') else item.category}")
-            typer.echo(f"  Scope:      {item.project_scope}")
-            typer.echo(f"  Tags:       {', '.join(item.tags) if item.tags else '(none)'}")
-            typer.echo(f"  Confidence: {item.confidence:.2f} (unverified)")
-            typer.echo(f"\n  Content:\n  {'-'*40}")
-
-            content_preview = item.content
-            if len(content_preview) > 400:
-                content_preview = content_preview[:400] + "\n  ...[truncated]"
-            for line in content_preview.splitlines():
-                typer.echo(f"  {line}")
-
-            typer.echo(f"  {'-'*40}\n")
-
-            # Prompt — Enter = promote
-            raw = typer.prompt(
-                "Action",
-                default="",
-                prompt_suffix=" [Enter=promote / d=discard / s=skip]: ",
-            ).strip().lower()
-
-            if raw in ("", "promote"):
-                try:
-                    vault_id = promote_to_vault(item.id)
-                    typer.echo(
-                        typer.style(
-                            f"  ✓ Promoted to vault: {vault_id}",
-                            fg=typer.colors.GREEN,
-                        )
-                    )
-                    promoted += 1
-                except Exception as e:
-                    typer.echo(
-                        typer.style(f"  ✗ Promotion failed: {e}", fg=typer.colors.RED)
-                    )
-
-            elif raw in ("d", "discard"):
-                try:
-                    purge_from_inbox(item.id)
-                    typer.echo(
-                        typer.style(f"  ✓ Discarded: {item.id}", fg=typer.colors.YELLOW)
-                    )
-                    discarded += 1
-                except Exception as e:
-                    typer.echo(
-                        typer.style(f"  ✗ Discard failed: {e}", fg=typer.colors.RED)
-                    )
-
-            else:  # s or anything else → skip
-                typer.echo("  → Skipped")
-                inbox_skipped += 1
-
-            reviewed_count += 1
-            typer.echo()
-
-    else:
-        typer.echo("\n[Inbox is empty — no auto-extracted drafts pending review]\n")
-
-    # --- Phase 2: Existing low-confidence vault review ---
     typer.echo(f"\n{'='*60}")
     typer.echo("  VAULT — Low-confidence memory review")
     typer.echo(f"{'='*60}\n")
@@ -797,22 +711,23 @@ def memory_review(
         console.print("[green]✓[/green] All memories look healthy. Nothing to review.")
     else:
         console.print(
-            f"\nReviewing {len(candidates)} items — "
-            "press Enter to accept each one, d/s to discard or skip\n"
-        )
-        console.print(
-            f"[bold]Reviewing {len(candidates)} memories[/bold] (low confidence or unaccessed)"
+            f"[bold]Reviewing {len(candidates)} memories[/bold] "
+            "(low confidence or unaccessed)\n"
         )
 
         for memory in candidates:
+            source_label = (
+                " [auto]" if memory.source.value == "auto_extracted" else ""
+            )
             console.print("\n" + "─" * 60)
             console.print(
-                f"[bold]ID:[/bold] {memory.id}  |  [bold]Conf:[/bold] {memory.confidence:.2f}  |  "
-                f"[bold]Accesses:[/bold] {memory.access_count}"
+                f"[bold]ID:[/bold] {memory.id}{source_label}  |  "
+                f"[bold]Conf:[/bold] {memory.confidence:.2f}  |  "
+                f"[bold]Accesses:[/bold] {memory.access_count}  |  "
+                f"[bold]Scope:[/bold] {memory.project_scope}"
             )
             console.print(f"[dim]{memory.content[:120]}{'...' if len(memory.content) > 120 else ''}[/dim]")
 
-            # Prompt — Enter = helpful
             raw = typer.prompt(
                 "Action",
                 default="",
@@ -831,19 +746,150 @@ def memory_review(
                 store.rate(memory.id, "wrong")
                 typer.echo(typer.style("  ✓ Marked wrong", fg=typer.colors.RED))
                 marked_wrong += 1
-            else:  # s or anything else → skip
+            else:
                 vault_skipped += 1
 
-    # --- Final summary ---
     console.print(
         f"\n[green]✓[/green] Review complete: "
-        f"{promoted} promoted, "
-        f"{discarded} discarded, "
         f"{marked_helpful} marked helpful, "
         f"{marked_outdated} marked outdated, "
         f"{marked_wrong} marked wrong, "
-        f"{inbox_skipped + vault_skipped} skipped"
+        f"{vault_skipped} skipped"
     )
+
+
+@memory_app.command("recent")
+def memory_recent(
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", help="Number of recent memories to show."),
+    ] = 20,
+    auto_only: Annotated[
+        bool,
+        typer.Option("--auto", help="Show only auto-extracted memories."),
+    ] = False,
+) -> None:
+    """
+    Show recently stored memories, newest first.
+
+    Use --auto to filter to only auto-extracted memories — useful for
+    auditing what the background extractor has been storing.
+    """
+    from rich.table import Table
+
+    store = _get_store()
+    memories = store.list(include_archived=False, limit=limit * 3)
+
+    # Sort by created_at descending
+    memories.sort(key=lambda m: m.created_at, reverse=True)
+
+    if auto_only:
+        memories = [m for m in memories if m.source.value == "auto_extracted"]
+
+    memories = memories[:limit]
+
+    if not memories:
+        console.print("[dim]No memories found.[/dim]")
+        return
+
+    table = Table(title=f"Recent Memories ({'auto-extracted only' if auto_only else 'all'})")
+    table.add_column("ID", style="dim", no_wrap=True)
+    table.add_column("Source", no_wrap=True)
+    table.add_column("Conf", justify="right")
+    table.add_column("Scope")
+    table.add_column("Tags")
+    table.add_column("Content", max_width=60)
+
+    for m in memories:
+        source_style = "yellow" if m.source.value == "auto_extracted" else "green"
+        table.add_row(
+            m.id,
+            f"[{source_style}]{m.source.value}[/{source_style}]",
+            f"{m.confidence:.2f}",
+            m.project_scope,
+            ", ".join(m.tags[:3]) or "(none)",
+            m.content[:80] + ("..." if len(m.content) > 80 else ""),
+        )
+
+    console.print(table)
+
+
+@memory_app.command("prune")
+def memory_prune(
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show what would be pruned without archiving."),
+    ] = False,
+    days: Annotated[
+        int,
+        typer.Option("--days", help="Minimum age in days before pruning."),
+    ] = 30,
+    max_confidence: Annotated[
+        float,
+        typer.Option("--max-confidence", help="Only prune memories below this confidence."),
+    ] = 0.5,
+) -> None:
+    """
+    Archive stale auto-extracted memories nobody has used.
+
+    Targets auto-extracted memories that are: older than --days, below
+    --max-confidence, and have zero accesses. These are memories the
+    system extracted but that have never proven useful.
+    """
+    from datetime import datetime, timezone
+
+    store = _get_store()
+    memories = store.list(include_archived=False, limit=10_000)
+
+    now = datetime.now(timezone.utc)
+    pruned = 0
+    candidates = []
+
+    for m in memories:
+        if m.source.value != "auto_extracted":
+            continue
+        if m.access_count > 0:
+            continue
+        if m.confidence >= max_confidence:
+            continue
+
+        # Ensure created_at is timezone-aware
+        created = m.created_at
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+
+        age_days = (now - created).days
+        if age_days < days:
+            continue
+
+        candidates.append((m, age_days))
+
+    if not candidates:
+        console.print(
+            f"[green]✓[/green] Nothing to prune "
+            f"(no auto-extracted memories older than {days}d with 0 accesses and conf < {max_confidence})."
+        )
+        return
+
+    console.print(
+        f"[bold]{'[DRY RUN] ' if dry_run else ''}Found {len(candidates)} memories to prune:[/bold]\n"
+    )
+
+    for m, age_days in candidates:
+        console.print(
+            f"  [dim]{m.id}[/dim]  conf={m.confidence:.2f}  "
+            f"age={age_days}d  {m.content[:60]}{'...' if len(m.content) > 60 else ''}"
+        )
+        if not dry_run:
+            store.forget(m.id)
+            pruned += 1
+
+    if dry_run:
+        console.print(f"\n[dim]Dry run — nothing archived. Run without --dry-run to prune.[/dim]")
+    else:
+        console.print(f"\n[green]✓[/green] Pruned {pruned} stale auto-extracted memories.")
+
+
 
 # Session commands
 

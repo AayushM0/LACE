@@ -340,7 +340,12 @@ def create_server() -> Server:
                 ),
                 inputSchema={
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "working_directory": {
+                            "type": "string",
+                            "description": "The full absolute path to the project's working directory."
+                        }
+                    },
                     "required": [],
                 },
             ),
@@ -406,7 +411,9 @@ def create_server() -> Server:
                     scope=arguments.get("scope", "auto"),
                 )
             elif name == "initialize_lace_session":
-                result = await initialize_lace_session()
+                result = await initialize_lace_session(
+                    working_directory=arguments.get("working_directory", "")
+                )
             else:
                 result = {"error": f"Unknown tool: {name}"}
 

@@ -121,6 +121,8 @@ def extract_from_conversation(
     require_confirmation: bool = False,
     provider=None,
     context: str = "",
+    source: str = "conversation",
+    confidence_cap: float | None = None,
 ) -> ExtractionResult:
     # Never store extracted memories under a session scope
     # Sessions are ephemeral — extracted knowledge should persist
@@ -223,13 +225,18 @@ def extract_from_conversation(
                 ]
 
             else:  # STORE
+                stored_confidence = (
+                    min(candidate.confidence, confidence_cap)
+                    if confidence_cap is not None
+                    else candidate.confidence
+                )
                 saved = store.add(
                     content=candidate.content,
                     category=candidate.category,
                     tags=candidate.tags,
                     scope=scope,
-                    source="conversation",
-                    confidence=candidate.confidence,
+                    source=source,
+                    confidence=stored_confidence,
                 )
                 stored.append(saved.id)
                 existing.append(saved)

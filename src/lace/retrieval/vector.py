@@ -65,6 +65,9 @@ class DummyEmbeddingFunction:
     def __call__(self, input: chromadb.Documents) -> chromadb.Embeddings:
         return [[0.0]] * len(input)
 
+    def name(self) -> str:
+        return "dummy"
+
 
 def get_collection(
     scope: str,

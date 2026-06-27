@@ -49,9 +49,6 @@ def get_model(model_name: str = "all-MiniLM-L6-v2") -> "SentenceTransformer":
             import warnings
             warnings.filterwarnings("ignore")
             os.environ["TOKENIZERS_PARALLELISM"] = "false"
-            os.environ["HF_HUB_OFFLINE"] = "1"          # ← ADD THIS LINE
-            os.environ["TRANSFORMERS_OFFLINE"] = "1"     # ← AND THIS LINE
-
             # Suppress transformers logging
             try:
                 import transformers

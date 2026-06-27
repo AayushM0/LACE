@@ -353,7 +353,9 @@ class MemoryStore:
                 )
                 upsert_memory(memory, self.vector_db_path)
                 success += 1
-            except Exception:
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
                 failure += 1
 
         return success, failure
