@@ -187,7 +187,16 @@ def _get_store(scope: str | None = None):
     # Set active scope for store to use in searches
     if scope is None:
         scope = get_active_scope()
-    # We'll add active scope to store in Chunk 5
+
+    # Initialize multi-signal retrieval indices.
+    try:
+        store.initialize()
+    except Exception as e:
+        import logging
+        logging.getLogger("lace.main").warning(
+            f"MemoryStore.initialize() failed, falling back to classic search: {e}"
+        )
+
     return store
 
 
@@ -1865,6 +1874,16 @@ def generate_context(
 
     # Load memories
     store = MemoryStore()
+
+    # Initialize multi-signal retrieval indices.
+    try:
+        store.initialize()
+    except Exception as e:
+        import logging
+        logging.getLogger("lace.main").warning(
+            f"MemoryStore.initialize() failed, falling back to classic search: {e}"
+        )
+
     typer.echo(f"Loading memories for project: {project_name}")
 
     grouped = load_memories_for_generation(

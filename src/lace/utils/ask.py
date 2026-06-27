@@ -160,6 +160,16 @@ def ask(
     memories: list[RetrievalResult] = []
     if use_memory:
         store = MemoryStore(lace_home=lace_home, config=config)
+
+        # Initialize multi-signal retrieval indices.
+        try:
+            store.initialize()
+        except Exception as e:
+            import logging
+            logging.getLogger("lace.utils.ask").warning(
+                f"MemoryStore.initialize() failed, falling back to classic search: {e}"
+            )
+
         memories = store.search(
             query=query,
             scope=resolved_scope,

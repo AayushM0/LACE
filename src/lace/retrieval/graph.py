@@ -118,7 +118,7 @@ class MemoryGraph:
     MIN_SHARED_TAGS: int = 2
 
     # Temporal window for TEMPORAL edges
-    TEMPORAL_WINDOW_MINUTES: int = 30
+    TEMPORAL_WINDOW_MINUTES: int = 5
 
     # Maximum weight for TEMPORAL edges (deliberately weak signal)
     MAX_TEMPORAL_WEIGHT: float = 0.3
@@ -641,8 +641,8 @@ class MemoryGraph:
                 )
                 weight = closeness * self.MAX_TEMPORAL_WEIGHT
 
-                if weight < 0.05:
-                    continue  # Too weak to be worth storing
+                if weight < 0.20:
+                    continue  # Raise threshold to reduce noise
 
                 self.add_edge(
                     source=mem_a.id,

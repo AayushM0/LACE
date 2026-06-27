@@ -44,6 +44,18 @@ def _get_store(scope: str | None = None) -> tuple[MemoryStore, str]:
     config = load_config(lace_home)
     store = MemoryStore(lace_home=lace_home, config=config)
 
+    # Initialize multi-signal retrieval (tag index, graph, co-retrieval tracker).
+    # Safe to call even if vault is empty — initializes to empty indices.
+    # If initialization fails for any reason, store falls back to classic
+    # vector-only search automatically via the _initialized flag.
+    try:
+        store.initialize()
+    except Exception as e:
+        import logging
+        logging.getLogger("lace.mcp.tools").warning(
+            f"MemoryStore.initialize() failed, falling back to classic search: {e}"
+        )
+
     if scope is None or scope == "auto":
         # Use MCP context if set, otherwise try auto-detecting from cwd, then default to global
         if _mcp_context_project:

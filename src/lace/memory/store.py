@@ -20,6 +20,12 @@ from lace.memory.models import (
     make_memory,
 )
 
+# ── NEW: Multi-signal retrieval imports ──────────────────────────────────────
+from lace.retrieval.tag_index import TagIndex
+from lace.retrieval.graph import MemoryGraph, EdgeType as GraphEdgeType
+from lace.retrieval.co_occurrence import CoRetrievalTracker
+from lace.retrieval.unified import UnifiedRetriever, UnifiedWeights
+
 
 class MemoryStore:
     """Primary interface for reading and writing memories."""
@@ -37,6 +43,13 @@ class MemoryStore:
         self.active_scope   = active_scope or "global"
         self._logger        = None   # lazy loaded
 
+        # ── NEW: Multi-signal retrieval components ──────────────────────────
+        self._tag_index   = TagIndex()
+        self._graph       = MemoryGraph()
+        self._co_tracker  = CoRetrievalTracker(graph=self._graph)
+        self._unified     = None
+        self._initialized = False
+
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _get_model_name(self) -> str:
@@ -53,7 +66,110 @@ class MemoryStore:
             from lace.retrieval.vector import upsert_memory
             upsert_memory(memory, self.vector_db_path)
         except Exception:
-            pass  # Vector store is optional — markdown is source of truth
+            pass
+
+    # ── NEW: Initialization ───────────────────────────────────────────────────
+
+    def initialize(self) -> dict[str, int | float | str]:
+        """
+        Build tag index, load graph, restore co-retrievals, create unified retriever.
+
+        Must be called after construction, before the first search() call.
+        """
+        import time
+        import logging
+
+        start = time.perf_counter()
+
+        # 1. Load active memories
+        all_memories = load_all_memories(self.vault_path)
+        active = [m for m in all_memories if m.is_active()]
+        memory_count = len(active)
+
+        # 2. Build tag index
+        self._tag_index.build(active)
+        tag_count = self._tag_index.tag_count()
+
+        # 3. Load persisted graph
+        graph_path = self.lace_home / "memory" / "graph.json"
+        loaded_edges = self._graph.load(graph_path)
+
+        # 4. Run batch graph builder
+        new_edges = self._graph.build_from_memories(active, self._tag_index)
+
+        # 5. Save the now-complete graph
+        self._graph.save(graph_path)
+        total_edge_count = self._graph.edge_count()
+
+        # 6. Load persisted co-retrieval tracker
+        co_path = self.lace_home / "memory" / "co_retrieval.json"
+        self._co_tracker.load(co_path)
+
+        # 7. Set co-tracker save path
+        self._co_tracker.set_save_path(co_path)
+
+        # 8. Create UnifiedRetriever
+        def vector_search_wrapper(query: str, n_results: int) -> list[dict]:
+            try:
+                from lace.retrieval.embeddings import embed_text
+                from lace.retrieval.vector import multi_scope_vector_search
+
+                scopes = self._get_search_scopes(self.active_scope)
+                query_embedding = embed_text(
+                    query, model_name=self._get_model_name()
+                )
+                return multi_scope_vector_search(
+                    query_embedding=query_embedding,
+                    scopes=scopes,
+                    vector_db_path=self.vector_db_path,
+                    n_results=n_results,
+                )
+            except Exception:
+                return []
+
+        self._unified = UnifiedRetriever(
+            vector_search_fn=vector_search_wrapper,
+            get_memory_fn=self.get,
+            tag_index=self._tag_index,
+            graph=self._graph,
+            co_tracker=self._co_tracker,
+            weights=UnifiedWeights(),
+        )
+
+        # 9. Mark as initialized
+        self._initialized = True
+
+        elapsed = time.perf_counter() - start
+
+        co_stats = self._co_tracker.stats()
+        results = {
+            "indexed_memories":    memory_count,
+            "distinct_tags":       tag_count,
+            "graph_edges":         total_edge_count,
+            "edges_loaded":        loaded_edges,
+            "edges_discovered":    (
+                new_edges.get("explicit", 0)
+                + new_edges.get("tag_similarity", 0)
+                + new_edges.get("temporal", 0)
+            ),
+            "co_pairs_loaded":     co_stats.get("tracked_pairs", 0),
+            "initialization_ms":   round(elapsed * 1000, 1),
+        }
+
+        logging.getLogger("lace.store").info(
+            f"MemoryStore initialized: "
+            f"{memory_count} memories, {tag_count} tags, "
+            f"{total_edge_count} graph edges "
+            f"({elapsed:.1f}s)"
+        )
+
+        return results
+
+    def _get_search_scopes(self, scope: str) -> list[str]:
+        """Determine which ChromaDB collections to search based on scope."""
+        if scope == "global":
+            return ["global"]
+        return [scope, "global"]
 
     # ── Write ─────────────────────────────────────────────────────────────────
 
@@ -66,11 +182,10 @@ class MemoryStore:
         source: str | MemorySource = MemorySource.MANUAL,
         confidence: float = 0.8,
         summary: str | None = None,
-        draft: bool = False,  # NEW: routes to inbox instead of vault
+        draft: bool = False,
     ) -> MemoryObject:
         """Create and persist a new memory with embedding."""
         if draft:
-            # Route to inbox — do not touch ChromaDB or vault
             from lace.memory.inbox import save_to_inbox
             
             memory = make_memory(
@@ -103,7 +218,7 @@ class MemoryStore:
         try:
             memory.embedding = self._embed(content)
         except Exception:
-            memory.embedding = None  # Graceful degradation
+            memory.embedding = None
 
         # Write markdown file (source of truth)
         save_memory_to_file(memory, self.vault_path)
@@ -111,7 +226,50 @@ class MemoryStore:
         # Write to vector store
         self._upsert_to_vector_store(memory)
 
+        # ── NEW: Update indices for multi-signal retrieval ──────────────────
+        if self._initialized:
+            self._update_indices_for_new_memory(memory)
+
         return memory
+
+    def _update_indices_for_new_memory(self, memory: MemoryObject) -> None:
+        """Update tag index, graph, and persistence after storing a new memory."""
+        # Update tag index
+        self._tag_index.add(memory)
+
+        # Create EXPLICIT edges from related_ids
+        for related_id in memory.related_ids:
+            related = self.get(related_id)
+            if related is not None and related.is_active():
+                self._graph.add_edge(
+                    source=memory.id,
+                    target=related_id,
+                    edge_type=GraphEdgeType.EXPLICIT,
+                    weight=1.0,
+                    bidirectional=True,
+                )
+
+        # Create TAG_SIMILARITY edges from shared tags
+        tag_neighbors = self._tag_index.find_tag_neighbors(
+            source_memory_ids=[memory.id],
+            max_results=10,
+            min_score=0.3,
+        )
+        for neighbor_id, _ in tag_neighbors:
+            shared = self._tag_index.shared_tags(memory.id, neighbor_id)
+            if len(shared) >= self._graph.MIN_SHARED_TAGS:
+                jaccard = self._tag_index.jaccard_similarity(memory.id, neighbor_id)
+                self._graph.add_edge(
+                    source=memory.id,
+                    target=neighbor_id,
+                    edge_type=GraphEdgeType.TAG_SIMILARITY,
+                    weight=jaccard,
+                    bidirectional=True,
+                )
+
+        # Save the updated graph
+        graph_path = self.lace_home / "memory" / "graph.json"
+        self._graph.save(graph_path)
 
     def save(self, memory: MemoryObject) -> Path:
         """Persist an existing MemoryObject (update file + vector store)."""
@@ -135,7 +293,25 @@ class MemoryStore:
 
         # Update vector store metadata to reflect archived state
         self._upsert_to_vector_store(memory)
+
+        # ── NEW: Clean up indices ─────────────────────────────────────────
+        if self._initialized:
+            self._clean_indices_for_archived_memory(memory_id)
+
         return True
+
+    def _clean_indices_for_archived_memory(self, memory_id: str) -> None:
+        """Remove archived memory from tag index, graph, and co-retrieval tracker."""
+        self._tag_index.remove(memory_id)
+        self._graph.remove_node(memory_id)
+        self._co_tracker.purge_memory(memory_id)
+
+        # Force save graph and co-tracker after destructive operation
+        graph_path = self.lace_home / "memory" / "graph.json"
+        self._graph.save(graph_path)
+
+        co_path = self.lace_home / "memory" / "co_retrieval.json"
+        self._co_tracker.save(co_path)
 
     # ── Read ──────────────────────────────────────────────────────────────────
 
@@ -146,11 +322,7 @@ class MemoryStore:
         return None
 
     def record_access(self, memory_id: str) -> None:
-        """Increment access count and update last_accessed timestamp.
-        
-        Called every time a memory is retrieved via MCP or search.
-        Used for frequency scoring in multi-signal ranking.
-        """
+        """Increment access count and update last_accessed timestamp."""
         from datetime import datetime, timezone
         
         memory = self.get(memory_id)
@@ -208,21 +380,24 @@ class MemoryStore:
 
         start = time.perf_counter()
 
-        try:
-            results    = self._vector_search(query, _scope, _max, _threshold)
-            match_type = "vector"
-        except Exception:
-            keyword_results = self.search_keyword(query, limit=_max)
-            results = [
-                RetrievalResult(
-                    memory=m,
-                    relevance_score=0.5,
-                    match_type="keyword",
-                    rank=i + 1,
+        if self._initialized and self._unified is not None:
+            # ── Use unified multi-signal retriever ────────────────────────
+            try:
+                results = self._unified.retrieve(
+                    query=query,
+                    max_results=_max,
+                    threshold=_threshold,
+                    active_scope=_scope,
                 )
-                for i, m in enumerate(keyword_results)
-            ]
-            match_type = "keyword"
+                match_type = "unified"
+            except Exception:
+                # Fallback to vector-only on error
+                results = self._fallback_search(query, _scope, _max, _threshold)
+                match_type = self._detect_match_type(results)
+        else:
+            # ── Original behavior (not initialized) ───────────────────────
+            results = self._fallback_search(query, _scope, _max, _threshold)
+            match_type = self._detect_match_type(results)
 
         latency_ms = (time.perf_counter() - start) * 1000
 
@@ -238,6 +413,38 @@ class MemoryStore:
             )
 
         return results
+
+    def _fallback_search(
+        self,
+        query: str,
+        scope: str,
+        max_results: int,
+        threshold: float,
+    ) -> list[RetrievalResult]:
+        """
+        Original vector search + keyword fallback logic.
+        Preserves exact original behavior.
+        """
+        try:
+            results = self._vector_search(query, scope, max_results, threshold)
+        except Exception:
+            keyword_results = self.search_keyword(query, limit=max_results)
+            results = [
+                RetrievalResult(
+                    memory=m,
+                    relevance_score=0.5,
+                    match_type="keyword",
+                    rank=i + 1,
+                )
+                for i, m in enumerate(keyword_results)
+            ]
+        return results
+
+    def _detect_match_type(self, results: list[RetrievalResult]) -> str:
+        """Derive match_type from results if available, else default."""
+        if results and hasattr(results[0], "match_type"):
+            return results[0].match_type
+        return "vector"
 
     def _get_logger(self):
         """Lazy-load the retrieval logger."""
@@ -260,10 +467,7 @@ class MemoryStore:
         from lace.retrieval.ranking import rank_candidates, RankingWeights
 
         # Determine which scopes to search
-        if scope == "global":
-            scopes = ["global"]
-        else:
-            scopes = [scope, "global"]  # Project first, then global
+        scopes = self._get_search_scopes(scope)
 
         # Embed the query
         query_embedding = embed_text(query, model_name=self._get_model_name())
@@ -273,13 +477,13 @@ class MemoryStore:
             query_embedding=query_embedding,
             scopes=scopes,
             vector_db_path=self.vector_db_path,
-            n_results=max_results * 2,  # Over-fetch for ranking to filter
+            n_results=max_results * 2,
         )
 
         if not raw_results:
             return []
 
-        # Load full MemoryObjects from markdown (vector store has metadata only)
+        # Load full MemoryObjects from markdown
         candidates: list[tuple[MemoryObject, float]] = []
         for result in raw_results:
             memory = self.get(result["id"])
@@ -330,14 +534,7 @@ class MemoryStore:
         return [m for m, _ in matches[:limit]]
 
     def reindex_all(self) -> tuple[int, int]:
-        """Re-embed and re-index all memories into the vector store.
-
-        Useful after switching embedding models or if vector store
-        gets out of sync with the markdown vault.
-
-        Returns:
-            (success_count, failure_count)
-        """
+        """Re-embed and re-index all memories into the vector store."""
         from lace.retrieval.vector import upsert_memory
         from lace.retrieval.embeddings import embed_text
 
@@ -361,7 +558,7 @@ class MemoryStore:
         return success, failure
 
     def stats(self) -> dict[str, int | dict]:
-        """Return memory statistics."""
+        """Return memory statistics including multi-signal index health."""
         all_memories = load_all_memories(self.vault_path)
 
         by_category: dict[str, int] = {}
@@ -373,7 +570,7 @@ class MemoryStore:
             by_lifecycle[memory.lifecycle.value] = by_lifecycle.get(memory.lifecycle.value, 0) + 1
             by_scope[memory.project_scope] = by_scope.get(memory.project_scope, 0) + 1
 
-        return {
+        result: dict = {
             "total": len(all_memories),
             "active": sum(1 for m in all_memories if m.is_active()),
             "archived": sum(1 for m in all_memories if not m.is_active()),
@@ -382,16 +579,22 @@ class MemoryStore:
             "by_scope": by_scope,
         }
 
+        # ── NEW: Add index stats if initialized ───────────────────────────
+        if self._initialized:
+            result["tag_index"]      = self._tag_index.stats()
+            result["graph"]          = self._graph.stats()
+            result["co_retrieval"]   = self._co_tracker.stats()
+            result["retrieval_mode"] = "unified"
+
+            if self._unified is not None:
+                result["weights"] = self._unified.get_weights().to_dict()
+        else:
+            result["retrieval_mode"] = "classic"
+
+        return result
+
     def rate(self, memory_id: str, signal: str) -> bool:
-        """Update memory confidence based on explicit user feedback.
-
-        Args:
-            memory_id: The ID of the memory to rate.
-            signal: "helpful", "outdated", or "wrong".
-
-        Returns:
-            True if memory was found and rated, False otherwise.
-        """
+        """Update memory confidence based on explicit user feedback."""
         from datetime import datetime, timezone
 
         memory = self.get(memory_id)
@@ -428,13 +631,7 @@ class MemoryStore:
         include_zero_access: bool = True,
         limit: int = 50,
     ) -> list[MemoryObject]:
-        """Return memories that need attention for review.
-
-        Criteria:
-        - Confidence < min_confidence
-        - OR never accessed (access_count == 0) and still "captured"
-        - Excludes already archived memories
-        """
+        """Return memories that need attention for review."""
         memories = self.list(include_archived=False, limit=10_000)
 
         candidates = []
@@ -444,6 +641,5 @@ class MemoryStore:
             elif include_zero_access and m.access_count == 0 and m.lifecycle.value == "captured":
                 candidates.append(m)
 
-        # Sort by confidence ascending (lowest first), then by creation date
         candidates.sort(key=lambda x: (x.confidence, x.created_at))
         return candidates[:limit]
