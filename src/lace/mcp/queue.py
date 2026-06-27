@@ -108,11 +108,22 @@ def _get_connection() -> sqlite3.Connection:
     2. No risk of a stale connection state causing silent data corruption
     3. The worker poll interval is 30 seconds — connection overhead is irrelevant
     """
+    db_path = get_queue_db_path()
     conn = sqlite3.connect(
-        str(get_queue_db_path()),
+        str(db_path),
         check_same_thread=False,
         timeout=10.0,  # Wait up to 10 seconds for locks to clear
     )
+    
+    # Always ensure tables and indexes exist. This guarantees LACE recovers
+    # gracefully if the database file is deleted/reset while the server is running.
+    try:
+        conn.execute(_CREATE_TABLE_SQL)
+        conn.execute(_CREATE_INDEX_SQL)
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to auto-initialize queue DB tables: {e}")
+        
     conn.row_factory = sqlite3.Row  # Allow dict-style access: row['id']
     return conn
 
@@ -339,62 +350,62 @@ def _build_context_from_history(history: list[dict]) -> str:
 def _process_single_job(job: dict) -> None:
     """
     Processes one extraction job. Called by the worker loop.
-    
+
     All exceptions are caught by the caller — this function may raise
     and the worker loop handles retry/fail logic.
     """
-    # Import here to avoid circular imports at module load time.
-    # These imports happen inside the worker thread, which is fine.
     from lace.memory.extractor import (
         extract_from_conversation,
         should_attempt_extraction,
     )
-    from lace.memory.inbox import save_to_inbox
-    
+    from lace.memory.store import MemoryStore
+    from lace.core.config import get_lace_home, load_config
+
     job_id = job["id"]
     history = json.loads(job.get("history_json", "[]"))
     context = _build_context_from_history(history)
-    
+
     # Fast pre-filter: cheap, no LLM call.
-    # If this returns False, the turn isn't worth extracting from.
     if not should_attempt_extraction(job["query"], job["response"]):
         logger.debug(f"Job {job_id}: pre-filter rejected, marking done")
         mark_done(job_id)
         return
-    
-    # Call the existing LLM extractor.
-    # This is the slow part (5-30 seconds depending on hardware).
+
+    # Build a real store so the extractor can run its full dedup pipeline
+    # (Steps 5 & 6 in extract_from_conversation). Without a store the extractor
+    # returns raw candidates and skips dedup entirely.
+    try:
+        lace_home = get_lace_home()
+        config = load_config(lace_home)
+        store = MemoryStore(lace_home=lace_home, config=config)
+    except Exception as e:
+        logger.error(f"Job {job_id}: could not build MemoryStore: {e}")
+        raise
+
     result = extract_from_conversation(
         query=job["query"],
         response=job["response"],
         context=context,
         scope=job["scope"],
+        store=store,
+        source="auto_extracted",   # distinct from manually-added memories
+        confidence_cap=0.4,        # probationary confidence — rises via record_access
     )
-    
-    if hasattr(result, "candidates"):
-        candidates = result.candidates
-    else:
-        candidates = result
-    
-    if not candidates:
-        logger.debug(f"Job {job_id}: extractor returned no candidates")
-        mark_done(job_id)
-        return
-    
-    # Write each candidate to inbox — never directly to vault.
-    # Inbox items are unverified drafts awaiting user review.
-    saved_count = 0
-    for candidate in candidates:
-        try:
-            draft_id = save_to_inbox(candidate)
-            logger.info(f"Job {job_id}: saved draft {draft_id}")
-            saved_count += 1
-        except Exception as e:
-            # Don't fail the whole job if one candidate fails to save
-            logger.warning(f"Job {job_id}: failed to save candidate: {e}")
-    
-    logger.info(f"Job {job_id}: completed, {saved_count} drafts saved")
+
+    stored_count = len(result.stored) if hasattr(result, "stored") else 0
+    merged_count = len(result.merged) if hasattr(result, "merged") else 0
+    skipped_count = result.skipped if hasattr(result, "skipped") else 0
+
+    if result.error:
+        logger.warning(f"Job {job_id}: extractor error: {result.error}")
+
+    logger.info(
+        f"Job {job_id}: completed — "
+        f"{stored_count} stored, {merged_count} merged, {skipped_count} skipped"
+    )
     mark_done(job_id)
+
+
 
 
 def _worker_loop() -> None:

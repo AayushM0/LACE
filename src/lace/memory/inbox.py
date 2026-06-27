@@ -1,7 +1,12 @@
 """
 LACE Inbox — unverified draft memory storage.
 
-The inbox is a staging area for auto-extracted memories. Nothing here
+[DEPRECATED] — This file is kept for backwards compatibility but is no 
+longer used by the queue worker. New auto-extracted memories are sent
+directly to the vault with a low confidence score, and reviewed via 
+`lace memory review`.
+
+The inbox was a staging area for auto-extracted memories. Nothing here
 is in ChromaDB. Nothing here affects existing search results. Users
 review and promote (or purge) via `lace memory review`.
 
@@ -34,7 +39,7 @@ def get_inbox_path() -> Path:
     return inbox_path
 
 
-def save_to_inbox(memory_obj) -> str:
+def save_to_inbox(memory_obj, scope: str | None = None) -> str:
     """
     Saves an auto-extracted memory candidate to the inbox as an
     unverified draft.
@@ -48,6 +53,7 @@ def save_to_inbox(memory_obj) -> str:
     
     Args:
         memory_obj: A MemoryObject from the extractor
+        scope: Optional scope to override or set on the memory
     
     Returns:
         draft_id: The new draft file ID (e.g. "draft_3f8a1b2c")
@@ -62,9 +68,11 @@ def save_to_inbox(memory_obj) -> str:
     is_mock = 'Mock' in type(memory_obj).__name__ or hasattr(memory_obj, "_mock_self")
     
     if not isinstance(memory_obj, MemoryObject) and not is_mock:
-        scope = getattr(memory_obj, "scope", "global")
-        if not scope:
-            scope = getattr(memory_obj, "project_scope", "global")
+        resolved_scope = scope
+        if not resolved_scope:
+            resolved_scope = getattr(memory_obj, "scope", None)
+        if not resolved_scope:
+            resolved_scope = getattr(memory_obj, "project_scope", "global")
             
         metadata = {}
         if hasattr(memory_obj, "reasoning") and memory_obj.reasoning:
@@ -74,11 +82,14 @@ def save_to_inbox(memory_obj) -> str:
             content=memory_obj.content,
             category=memory_obj.category,
             tags=memory_obj.tags or [],
-            scope=scope,
+            scope=resolved_scope,
             source="auto_extracted",
             confidence=0.0,
         )
         memory_obj.metadata = metadata
+    else:
+        if scope:
+            memory_obj.project_scope = scope
 
     # Override all fields that mark this as an unverified inbox item
     memory_obj.confidence = 0.0

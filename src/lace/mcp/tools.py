@@ -21,34 +21,8 @@ def _debug_log(msg: str) -> None:
 
 # ── Context state (set by set_context tool) ───────────────────────────────────
 
-def _detect_project_at_startup() -> tuple[str, str]:
-    """Detect git project at MCP server startup — runs exactly once on import.
-
-    Returns (cwd, project_scope) where project_scope is either
-    'project:<name>' or 'global'.
-    """
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            git_root = result.stdout.strip()
-            project_name = Path(git_root).name
-            return git_root, f"project:{project_name}"
-    except Exception:
-        pass
-    # Fallback: use process cwd
-    import os
-    cwd = os.getcwd()
-    return cwd, f"project:{Path(cwd).name}"
-
-
-_startup_cwd, _startup_project = _detect_project_at_startup()
-_mcp_context_cwd: str = _startup_cwd
-_mcp_context_project: str | None = _startup_project
+_mcp_context_cwd: str = ""
+_mcp_context_project: str | None = None
 
 
 TERSE_SIGNALS = [
@@ -70,10 +44,25 @@ def _get_store(scope: str | None = None) -> tuple[MemoryStore, str]:
     config = load_config(lace_home)
     store = MemoryStore(lace_home=lace_home, config=config)
 
+    # Initialize multi-signal retrieval (tag index, graph, co-retrieval tracker).
+    # Safe to call even if vault is empty — initializes to empty indices.
+    # If initialization fails for any reason, store falls back to classic
+    # vector-only search automatically via the _initialized flag.
+    try:
+        store.initialize()
+    except Exception as e:
+        import logging
+        logging.getLogger("lace.mcp.tools").warning(
+            f"MemoryStore.initialize() failed, falling back to classic search: {e}"
+        )
+
     if scope is None or scope == "auto":
         # Use MCP context if set, otherwise try auto-detecting from cwd, then default to global
         if _mcp_context_project:
-            resolved_scope = _mcp_context_project
+            project = _mcp_context_project
+            if not project.startswith("project:"):
+                project = f"project:{project}"
+            resolved_scope = project
         elif _mcp_context_cwd:
             from lace.core.scope import detect_current_project
             detected = detect_current_project(_mcp_context_cwd, lace_home)
@@ -762,9 +751,14 @@ async def process_interaction(
         except Exception:
             pass
 
-    # _mcp_context_project already stores full 'project:<name>' or None.
-    # Use it directly — do NOT add another 'project:' prefix.
-    resolved_scope = _mcp_context_project or "global"
+    # Safe scope resolution — handle both prefixed and unprefixed values
+    if _mcp_context_project:
+        project = _mcp_context_project
+        if not project.startswith("project:"):
+            project = f"project:{project}"
+        resolved_scope = project
+    else:
+        resolved_scope = "global"
 
     try:
         job_id = enqueue(
@@ -797,44 +791,44 @@ async def initialize_lace_session(
     working_directory: str = "",
     **kwargs,
 ) -> dict:
-    """Auto-detect active project and initialize session state.
-
-    ALWAYS call this at the start of every conversation before the user
-    sends their first message. Pass the current working directory so LACE
-    can scope memories to the correct project automatically.
-    """
-    global _mcp_context_project, _mcp_context_cwd
+    """ALWAYS call this tool automatically at the start of every new
+    conversation before the user sends their first message. Pass the
+    working directory of the current project. This sets the active
+    project scope so all memories are stored and retrieved correctly.
+    Never skip this call."""
+    global _mcp_context_cwd, _mcp_context_project
     import lace.mcp.server as mcp_server
-    import os
 
-    # Reset session history for this new conversation
+    # Reset session history for fresh conversation
     mcp_server._mcp_session_history.clear()
 
-    # Resolve working directory
-    cwd = working_directory.strip() or os.getcwd()
+    # Use provided directory or fall back to home
+    cwd = working_directory.strip() or str(Path.home())
     _mcp_context_cwd = cwd
-    cwd_path = Path(cwd)
 
-    # Auto-detect project — returns full 'project:<name>' string
+    # Detect project from the PROVIDED directory
+    # not from wherever the MCP server was launched
     try:
         from lace.core.scope import detect_current_project
-        detected = detect_current_project(cwd_path)
+        detected = detect_current_project(cwd=Path(cwd))
+        if detected:
+            _mcp_context_project = detected.replace(
+                "project:", ""
+            )
+        else:
+            _mcp_context_project = Path(cwd).name
     except Exception:
-        detected = None
-
-    # Fallback to directory name if git/yaml detection failed
-    if not detected:
-        detected = f"project:{cwd_path.name}" if cwd_path.name else "global"
-
-    _mcp_context_project = detected
+        _mcp_context_project = Path(cwd).name
 
     return {
         "status": "initialized",
         "project": _mcp_context_project,
         "cwd": _mcp_context_cwd,
         "message": (
-            f"LACE session active for project: {_mcp_context_project}. "
-            "Call get_relevant_context before every response. "
-            "Call process_interaction after worthy responses."
-        ),
+            f"LACE session active for project: "
+            f"{_mcp_context_project}. "
+            f"Call get_relevant_context before every "
+            f"response. Call process_interaction after "
+            f"worthy responses only."
+        )
     }

@@ -1,11 +1,26 @@
-# LACE Memory Protocol — Active
+---
+trigger: always_on
+---
 
-LACE persistent memory is connected via MCP. 
+    LACE persistent memory is connected via MCP.
 
-On EVERY turn without exception:
-1. Call get_relevant_context FIRST with the user's message before thinking or responding.
-2. Call process_interaction LAST after your complete response is generated.
+    Project context:
+    - Project name: [PROJECT_NAME]  
+    - Working directory: [FULL_ABSOLUTE_PATH]
 
-This applies from turn 1. Do not wait to be reminded. 
-Do not skip on simple messages. Do not skip on first turn.
-These two calls bookend every single response you generate.
+    Turn 1 only: Call initialize_lace_session with
+    working_directory set to [FULL_ABSOLUTE_PATH]
+
+    Every turn before responding:
+    Call get_relevant_context with the user message
+
+    After turns containing decisions, bug fixes, patterns,
+    or configurations: Call process_interaction with the
+    query and your full response. Skip for greetings,
+    clarifications, and generic explanations.
+    
+    Always call process_interaction at the end of every turn.
+
+
+For the lace project itself:
+    Working directory: /home/aayush-mittal/everything/projects/lace

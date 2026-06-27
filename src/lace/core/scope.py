@@ -85,23 +85,13 @@ def find_git_root(start_path: Path | str = os.getcwd()) -> Path | None:
 
 
 def get_project_name_from_git(root: Path) -> str | None:
-    """Extract project name from Git repo.
+    """Extract project name from git repo.
 
-    Tries:
-      1. Repo name from remote URL (e.g. "my-api" from "git@github.com:user/my-api.git")
-      2. Directory name of repo root
+    Uses directory name of repo root.
+    Remote URL parsing removed — unreliable for
+    project identification when remote name differs
+    from local directory name.
     """
-    try:
-        from git import Repo
-        repo = Repo(root)
-        if repo.remotes:
-            url = repo.remotes[0].url
-            if "/" in url:
-                name = url.split("/")[-1].replace(".git", "")
-                return name
-    except Exception:
-        pass
-
     return root.name
 
 

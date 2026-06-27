@@ -20,6 +20,16 @@ def _get_store() -> tuple[MemoryStore, str]:
     config = load_config(lace_home)
     store = MemoryStore(lace_home=lace_home, config=config)
     scope = get_active_scope(lace_home)
+
+    # Initialize multi-signal retrieval indices.
+    try:
+        store.initialize()
+    except Exception as e:
+        import logging
+        logging.getLogger("lace.mcp.resources").warning(
+            f"MemoryStore.initialize() failed, falling back to classic search: {e}"
+        )
+
     return store, scope
 
 

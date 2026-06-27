@@ -61,6 +61,14 @@ def _scope_to_collection_name(scope: str) -> str:
     return name[:63]
 
 
+class DummyEmbeddingFunction:
+    def __call__(self, input: chromadb.Documents) -> chromadb.Embeddings:
+        return [[0.0]] * len(input)
+
+    def name(self) -> str:
+        return "dummy"
+
+
 def get_collection(
     scope: str,
     vector_db_path: Path,
@@ -71,6 +79,7 @@ def get_collection(
     return client.get_or_create_collection(
         name=collection_name,
         metadata={"hnsw:space": "cosine"},
+        embedding_function=DummyEmbeddingFunction(),
     )
 
 
