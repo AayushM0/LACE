@@ -97,6 +97,73 @@ class ProviderConfig(BaseModel):
     openai: OpenAIProviderConfig = Field(default_factory=OpenAIProviderConfig)
     anthropic: AnthropicProviderConfig = Field(default_factory=AnthropicProviderConfig)
 
+
+class DedupConfig(BaseModel):
+    """
+    Controls deduplication behavior at two levels:
+    1. Queue-level hash suppression (before LLM extraction)
+    2. Vault-level semantic dedup (after extraction)
+
+    Thresholds:
+    - skip_threshold:  cosine sim above this → discard candidate entirely
+    - merge_threshold: cosine sim above this → merge into existing memory
+    - below merge_threshold → store as new memory
+    """
+    skip_threshold: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Cosine similarity above which a candidate is a duplicate and discarded",
+    )
+    merge_threshold: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description="Cosine similarity above which a candidate is merged into existing",
+    )
+    hash_cooldown_seconds: int = Field(
+        default=300,
+        ge=0,
+        description="Seconds within which identical canonical hashes are suppressed at queue insert",
+    )
+
+    def validate_thresholds(self) -> None:
+        """Ensure merge < skip — catches misconfiguration early."""
+        if self.merge_threshold >= self.skip_threshold:
+            raise ValueError(
+                f"merge_threshold ({self.merge_threshold}) must be "
+                f"less than skip_threshold ({self.skip_threshold})"
+            )
+
+
+class ExtractionConfig(BaseModel):
+    """
+    Controls the LLM extraction pipeline behavior.
+
+    require_worthiness_verdict: if True, every item must get a
+    worth_remembering judgment before any memory is stored.
+
+    log_all_verdicts: if True, even rejected items are written
+    to pipeline_log.db so you can audit what got filtered.
+    """
+    require_worthiness_verdict: bool = Field(
+        default=True,
+        description="Require LLM to judge worth_remembering before extracting",
+    )
+    log_all_verdicts: bool = Field(
+        default=True,
+        description="Log all LLM verdicts including rejections to pipeline_log.db",
+    )
+    extraction_model: str = Field(
+        default="gpt-4o-mini",
+        description="LLM model used for extraction",
+    )
+    max_memories_per_interaction: int = Field(
+        default=5,
+        ge=1,
+        description="Maximum number of memories extracted from a single interaction",
+    )
+
 class LaceConfig(BaseModel):
     """Root configuration model for LACE."""
     version: str = "1.0"
@@ -105,7 +172,15 @@ class LaceConfig(BaseModel):
     vault: VaultConfig = Field(default_factory=VaultConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
-    provider: ProviderConfig = Field(default_factory=ProviderConfig)  # ← add this
+    provider: ProviderConfig = Field(default_factory=ProviderConfig)
+    dedup: DedupConfig = Field(
+        default_factory=DedupConfig,
+        description="Deduplication configuration",
+    )
+    extraction: ExtractionConfig = Field(
+        default_factory=ExtractionConfig,
+        description="Extraction pipeline configuration",
+    )
 
     def vault_path(self, lace_home: Path) -> Path:
         """Resolve the vault path."""

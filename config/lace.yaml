@@ -47,3 +47,14 @@ provider:
     model: claude-3-5-sonnet-20241022
     temperature: 0.7
     context_window: 200000
+
+dedup:
+  skip_threshold: 0.95
+  merge_threshold: 0.85
+  hash_cooldown_seconds: 300
+
+extraction:
+  require_worthiness_verdict: true
+  log_all_verdicts: true
+  extraction_model: gpt-4o-mini
+  max_memories_per_interaction: 5

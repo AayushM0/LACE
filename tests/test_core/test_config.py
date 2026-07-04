@@ -8,6 +8,8 @@ from lace.core.config import (
     LaceConfig,
     MemoryConfig,
     RetrievalConfig,
+    DedupConfig,
+    ExtractionConfig,
     init_lace_home,
     load_config,
     save_config,
@@ -136,3 +138,123 @@ def test_vault_path_custom():
     config = LaceConfig()
     config.vault.path = "/custom/vault"
     assert config.vault_path(Path("/anything")) == Path("/custom/vault")
+
+
+# ── Chunk 1: DedupConfig tests ────────────────────────────────────────────────
+
+
+class TestDedupConfig:
+    """Unit tests for DedupConfig validation."""
+
+    def test_defaults_are_sensible(self):
+        cfg = DedupConfig()
+        assert cfg.skip_threshold == 0.95
+        assert cfg.merge_threshold == 0.85
+        assert cfg.hash_cooldown_seconds == 300
+
+    def test_threshold_validation_passes(self):
+        """merge < skip is valid."""
+        cfg = DedupConfig(merge_threshold=0.80, skip_threshold=0.95)
+        cfg.validate_thresholds()  # should not raise
+
+    def test_threshold_validation_fails_when_merge_gte_skip(self):
+        """merge >= skip should raise."""
+        cfg = DedupConfig(merge_threshold=0.95, skip_threshold=0.90)
+        with pytest.raises(ValueError, match="merge_threshold"):
+            cfg.validate_thresholds()
+
+    def test_float_bounds(self):
+        """Thresholds must be 0.0-1.0."""
+        with pytest.raises(Exception):
+            DedupConfig(skip_threshold=1.5)
+        with pytest.raises(Exception):
+            DedupConfig(merge_threshold=-0.1)
+
+
+# ── Chunk 1: ExtractionConfig tests ──────────────────────────────────────────
+
+
+class TestExtractionConfig:
+    """Unit tests for ExtractionConfig."""
+
+    def test_defaults(self):
+        cfg = ExtractionConfig()
+        assert cfg.require_worthiness_verdict is True
+        assert cfg.log_all_verdicts is True
+        assert cfg.max_memories_per_interaction == 5
+
+    def test_max_memories_minimum(self):
+        with pytest.raises(Exception):
+            ExtractionConfig(max_memories_per_interaction=0)
+
+
+# ── Chunk 1: LaceConfig nested blocks integration tests ──────────────────────
+
+
+class TestLaceConfigNewBlocks:
+    """Integration tests for dedup/extraction nested blocks via load_config/save_config."""
+
+    def test_defaults_when_no_file(self, tmp_path):
+        """Missing config file → all defaults apply."""
+        lace_home = tmp_path / ".lace"
+        cfg = load_config(lace_home)
+        assert cfg.dedup.skip_threshold == 0.95
+        assert cfg.extraction.require_worthiness_verdict is True
+
+    def test_save_and_reload(self, tmp_path):
+        """Save config then reload — new block values must survive round-trip."""
+        lace_home = tmp_path / ".lace"
+        (lace_home / "config").mkdir(parents=True)
+
+        original = LaceConfig(
+            dedup=DedupConfig(
+                skip_threshold=0.92,
+                merge_threshold=0.78,
+                hash_cooldown_seconds=600,
+            ),
+            extraction=ExtractionConfig(
+                require_worthiness_verdict=False,
+                log_all_verdicts=True,
+            ),
+        )
+        save_config(original, lace_home)
+
+        reloaded = load_config(lace_home)
+        assert reloaded.dedup.skip_threshold == 0.92
+        assert reloaded.dedup.merge_threshold == 0.78
+        assert reloaded.dedup.hash_cooldown_seconds == 600
+        assert reloaded.extraction.require_worthiness_verdict is False
+
+    def test_partial_yaml_uses_defaults(self, tmp_path):
+        """YAML with only some dedup fields → missing fields use defaults."""
+        lace_home = tmp_path / ".lace"
+        config_file = lace_home / "config" / "lace.yaml"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(yaml.dump({"dedup": {"skip_threshold": 0.90}}))
+
+        cfg = load_config(lace_home)
+        assert cfg.dedup.skip_threshold == 0.90
+        assert cfg.dedup.merge_threshold == 0.85       # default
+        assert cfg.dedup.hash_cooldown_seconds == 300  # default
+
+    def test_no_nested_blocks_uses_all_defaults(self, tmp_path):
+        """YAML with no dedup/extraction blocks → all defaults."""
+        lace_home = tmp_path / ".lace"
+        config_file = lace_home / "config" / "lace.yaml"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(yaml.dump({"version": "1.0"}))
+
+        cfg = load_config(lace_home)
+        assert cfg.dedup.skip_threshold == 0.95
+        assert cfg.extraction.log_all_verdicts is True
+
+    def test_lace_config_dedup_defaults(self):
+        """LaceConfig() constructor wires dedup/extraction with correct defaults."""
+        cfg = LaceConfig()
+        assert cfg.dedup.skip_threshold == 0.95
+        assert cfg.dedup.merge_threshold == 0.85
+        assert cfg.dedup.hash_cooldown_seconds == 300
+        assert cfg.extraction.require_worthiness_verdict is True
+        assert cfg.extraction.log_all_verdicts is True
+        assert cfg.extraction.extraction_model == "gpt-4o-mini"
+        assert cfg.extraction.max_memories_per_interaction == 5

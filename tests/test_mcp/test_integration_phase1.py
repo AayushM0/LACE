@@ -31,44 +31,35 @@ def isolated_lace_home(tmp_path, monkeypatch):
 
 
 class TestEndToEndExtractionPipeline:
-    def test_enqueue_to_inbox(self, isolated_lace_home):
+    def test_enqueue_to_vault(self, isolated_lace_home):
         """
-        Full pipeline: enqueue → worker processes → draft appears in inbox.
-        
-        This is the core Phase 1 flow.
+        Full pipeline: enqueue → worker processes → memory stored directly in vault.
         """
         from lace.mcp.queue import init_queue_db, enqueue, get_job_status, get_pending_jobs, _process_single_job
-        from lace.memory.inbox import list_inbox, get_inbox_count
+        from lace.memory.store import MemoryStore
         
         init_queue_db()
         
-        # Create a mock memory object that the extractor will "return"
-        mock_candidate = MagicMock()
-        mock_candidate.content = "We decided to use SQLite for the extraction queue."
-        mock_candidate.summary = "SQLite queue decision"
-        mock_candidate.category = "decision"
-        mock_candidate.tags = ["sqlite", "queue"]
-        mock_candidate.scope = "global"
-        mock_candidate.confidence = 0.75
-        mock_candidate.metadata = {}
+        # Mock LLM provider to return synthetic JSON response
+        mock_provider = MagicMock()
+        mock_provider.complete.return_value = """[
+          {
+            "content": "We decided to use SQLite for the extraction queue.",
+            "category": "decision",
+            "tags": ["sqlite", "queue"],
+            "confidence": 0.75,
+            "reasoning": "Test reasoning"
+          }
+        ]"""
         
-        # Track what gets written to inbox
-        written_drafts = []
-        
-        def mock_save_to_inbox(obj):
-            draft_id = f"draft_test{len(written_drafts):04d}"
-            written_drafts.append(draft_id)
-            return draft_id
+        # Mock MemoryStore dependencies for ChromaDB to avoid real vector DB issues
+        mock_client = MagicMock()
+        mock_collection = MagicMock()
+        mock_client.get_or_create_collection.return_value = mock_collection
         
         with patch("lace.memory.extractor.should_attempt_extraction", return_value=True):
-            with patch(
-                "lace.memory.extractor.extract_from_conversation",
-                return_value=[mock_candidate],
-            ):
-                with patch(
-                    "lace.memory.inbox.save_to_inbox",
-                    side_effect=mock_save_to_inbox,
-                ):
+            with patch("lace.utils.providers.get_provider", return_value=mock_provider):
+                with patch("lace.retrieval.vector.get_client", return_value=mock_client):
                     job_id = enqueue(
                         query="How should we handle the extraction queue?",
                         response="We decided to use SQLite for simplicity.",
@@ -83,7 +74,13 @@ class TestEndToEndExtractionPipeline:
         
         job = get_job_status(job_id)
         assert job["status"] == "done"
-        assert len(written_drafts) == 1
+        
+        # Verify the memory was saved directly to the vault
+        store = MemoryStore()
+        memories = store.list(scope="global")
+        assert len(memories) == 1
+        assert memories[0].content == "We decided to use SQLite for the extraction queue."
+        assert memories[0].category.value == "decision"
     
     def test_short_interaction_filtered_out(self, isolated_lace_home):
         """
@@ -164,18 +161,10 @@ class TestEndToEndExtractionPipeline:
 
     def test_promote_draft_to_vault(self, isolated_lace_home):
         """
-        Full pipeline test:
-        1. Enqueue job
-        2. Worker extracts and saves to inbox as draft
-        3. list_inbox shows the draft
-        4. promote_to_vault promotes draft to vault and deletes the draft
-        5. Verify the memory is in the vault store
+        Test manual promotion of a draft from inbox to vault.
         """
-        from lace.mcp.queue import init_queue_db, enqueue, get_job_status, get_pending_jobs, _process_single_job
-        from lace.memory.inbox import list_inbox, promote_to_vault, get_inbox_count
+        from lace.memory.inbox import save_to_inbox, list_inbox, promote_to_vault, get_inbox_count
         from lace.memory.store import MemoryStore
-        
-        init_queue_db()
         
         # Create a candidate
         from lace.memory.models import make_memory
@@ -186,32 +175,10 @@ class TestEndToEndExtractionPipeline:
             scope="global",
         )
         
-        with patch("lace.memory.extractor.should_attempt_extraction", return_value=True):
-            with patch(
-                "lace.memory.extractor.extract_from_conversation",
-                return_value=[candidate],
-            ):
-                job_id = enqueue(
-                    query="How should we handle the extraction queue?",
-                    response="We decided to use SQLite for simplicity.",
-                    scope="global",
-                    history=[],
-                )
-                
-                # Process synchronously
-                jobs = get_pending_jobs()
-                for job in jobs:
-                    _process_single_job(job)
-        
-        job = get_job_status(job_id)
-        assert job["status"] == "done"
-        
-        # Verify it's in the inbox
-        assert get_inbox_count() == 1
-        drafts = list_inbox()
-        assert len(drafts) == 1
-        draft_id = drafts[0].id
+        # Save to inbox
+        draft_id = save_to_inbox(candidate)
         assert draft_id.startswith("draft_")
+        assert get_inbox_count() == 1
         
         # Mock MemoryStore dependencies for ChromaDB to avoid real vector DB issues
         mock_client = MagicMock()

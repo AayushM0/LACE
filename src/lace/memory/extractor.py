@@ -349,3 +349,419 @@ def should_attempt_extraction(query: str, response: str) -> bool:
         return False
 
     return True
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CHUNK 3 — Worthiness-Gated Extraction Pipeline
+# ═══════════════════════════════════════════════════════════════════════════════
+# The functions below are a NEW, independent extraction pipeline that adds:
+#   - A structured worthiness verdict (worth_remembering + reason)
+#   - Pipeline log DB for full audit trail
+#   - ExtractionConfig wiring (require_worthiness_verdict, log_all_verdicts)
+#
+# The existing extract_from_conversation() API above is PRESERVED for
+# backward compatibility with main.py, mcp/queue.py, and utils/ask.py.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import logging as _logging
+from datetime import datetime as _datetime, timezone as _timezone
+from pathlib import Path as _Path
+from typing import Optional as _Optional
+
+from lace.core.config import ExtractionConfig as _ExtractionConfig
+from lace.memory.pipeline_log import (
+    PIPELINE_LOG_DB_PATH,
+    initialize_pipeline_log_db,
+    log_extraction_verdict as log_extraction_event,  # Keep the same name locally for ease
+)
+
+_logger = _logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Worthiness-gated extraction prompt
+#
+# Design: worth_remembering is the FIRST field so the model commits to
+# a verdict before generating memory content (left-to-right token order).
+# ---------------------------------------------------------------------------
+
+EXTRACTION_SYSTEM_PROMPT = """You extract durable, useful memory from a single developer-AI interaction.
+
+Respond ONLY with JSON matching this exact schema — no prose, no markdown, no extra keys:
+{
+  "worth_remembering": <boolean>,
+  "reason": "<one sentence: why this IS worth remembering, or why it is NOT>",
+  "memories": [
+    {
+      "category": "<pattern|decision|debug|reference|preference>",
+      "summary": "<one clear sentence a developer could read in isolation>",
+      "body": "<full context, details, code snippets if relevant>",
+      "tags": ["<tag1>", "<tag2>"]
+    }
+  ]
+}
+
+RULES FOR worth_remembering:
+
+Set worth_remembering to FALSE if the interaction is ANY of:
+  - A test, benchmark, stress test, ping, or synthetic loop
+  - Incrementing numbered sequences (test 1, test 2, test N)
+  - A simple greeting, acknowledgment, or one-word exchange
+  - A restatement of a question with no answer or decision
+  - Pure tool/command output with no insight (e.g. "success", "done", "ok")
+  - Vague or generic enough that it would apply to any project
+  - Something a developer would never need to recall in a future session
+
+Set worth_remembering to TRUE only if the interaction contains:
+  - A specific technical decision with reasoning
+  - A concrete debugging solution (problem + fix + why it works)
+  - A reusable pattern or approach with enough detail to apply again
+  - An explicit user preference about how they work
+  - A reference to a specific API, library, or system behavior
+
+RULES FOR memories array:
+  - If worth_remembering is false: memories MUST be an empty array []
+  - If worth_remembering is true: extract 1-3 memories maximum
+  - Each memory must be self-contained — readable with no other context
+  - summary must be a complete sentence, not a fragment
+  - tags must be lowercase, single words or hyphenated-phrases
+
+CATEGORY DEFINITIONS:
+  pattern    — a reusable approach or technique
+  decision   — an architectural or design choice made in this session
+  debug      — a specific bug identified and resolved
+  reference  — factual information about an API, library, or system
+  preference — how this developer prefers to work or structure things"""
+
+
+# ---------------------------------------------------------------------------
+# Response parsing and validation
+# ---------------------------------------------------------------------------
+
+VALID_CATEGORIES = {"pattern", "decision", "debug", "reference", "preference"}
+
+
+def _validate_memory_dict(mem: dict, index: int) -> _Optional[dict]:
+    """
+    Validate a single memory dict from the LLM response.
+    Returns the validated dict, or None if structurally invalid.
+    """
+    required_fields = {"category", "summary", "body", "tags"}
+    missing = required_fields - set(mem.keys())
+    if missing:
+        _logger.warning(
+            f"[Extractor] Memory[{index}] missing fields: {missing}. Skipping."
+        )
+        return None
+
+    if mem["category"] not in VALID_CATEGORIES:
+        _logger.warning(
+            f"[Extractor] Memory[{index}] invalid category: "
+            f"'{mem['category']}'. Skipping."
+        )
+        return None
+
+    if not isinstance(mem["summary"], str) or len(mem["summary"].strip()) < 10:
+        _logger.warning(
+            f"[Extractor] Memory[{index}] summary too short or invalid. Skipping."
+        )
+        return None
+
+    if not isinstance(mem["tags"], list):
+        _logger.warning(
+            f"[Extractor] Memory[{index}] tags must be a list. Skipping."
+        )
+        return None
+
+    # Normalize: lowercase tags, strip whitespace
+    mem["tags"] = [
+        str(t).lower().strip()
+        for t in mem["tags"]
+        if str(t).strip()
+    ]
+    return mem
+
+
+def parse_extraction_response(raw: str) -> dict:
+    """
+    Parse and validate the new-format LLM JSON response.
+
+    Expected schema::
+
+        {
+            "worth_remembering": bool,
+            "reason": str,
+            "memories": [...]
+        }
+
+    Returns a dict guaranteed to have all three keys.
+    On any failure, returns a safe fallback (worth_remembering=False).
+    Never raises.
+    """
+    _fallback = {
+        "worth_remembering": False,
+        "reason": "Parse error — defaulting to not worth remembering",
+        "memories": [],
+    }
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _logger.error(f"[Extractor] JSON decode failed: {e}. Raw: {raw[:200]}")
+        _fallback["reason"] = f"JSON decode error: {e}"
+        return _fallback
+
+    if "worth_remembering" not in parsed:
+        _logger.error(
+            "[Extractor] Response missing 'worth_remembering'. "
+            f"Keys found: {list(parsed.keys())}"
+        )
+        _fallback["reason"] = "Missing worth_remembering field in LLM response"
+        return _fallback
+
+    # Coerce 0/1 to bool (some models emit integers)
+    if not isinstance(parsed["worth_remembering"], bool):
+        parsed["worth_remembering"] = bool(parsed["worth_remembering"])
+
+    # Reason field
+    reason = parsed.get("reason", "")
+    if not isinstance(reason, str) or not reason.strip():
+        reason = "No reason provided by extraction model"
+    parsed["reason"] = reason.strip()
+
+    # Memories array
+    raw_memories = parsed.get("memories", [])
+    if not isinstance(raw_memories, list):
+        _logger.warning("[Extractor] 'memories' field is not a list. Using [].")
+        parsed["memories"] = []
+        return parsed
+
+    # Enforce schema contract: worth=false → memories must be empty
+    if not parsed["worth_remembering"] and raw_memories:
+        _logger.warning(
+            "[Extractor] worth_remembering=false but memories non-empty. "
+            f"Discarding {len(raw_memories)} memories — schema contract enforced."
+        )
+        parsed["memories"] = []
+        return parsed
+
+    # Validate each memory dict individually
+    validated = []
+    for i, mem in enumerate(raw_memories):
+        if not isinstance(mem, dict):
+            _logger.warning(f"[Extractor] Memory[{i}] is not a dict. Skipping.")
+            continue
+        result = _validate_memory_dict(mem, i)
+        if result is not None:
+            validated.append(result)
+
+    parsed["memories"] = validated
+    return parsed
+
+
+# ---------------------------------------------------------------------------
+# LLM caller (gated pipeline only)
+# ---------------------------------------------------------------------------
+
+def call_llm(
+    query: str,
+    response: str,
+    config: "LaceConfig",  # type: ignore[name-defined]  # forward ref
+) -> str:
+    """
+    Call the configured LLM with EXTRACTION_SYSTEM_PROMPT.
+    Returns raw JSON string. Supports openai, anthropic, local.
+    """
+    from lace.core.config import LaceConfig as _LaceConfig
+
+    user_content = (
+        f"Extract memory from this interaction:\n\n"
+        f"QUERY:\n{query}\n\n"
+        f"RESPONSE:\n{response}"
+    )
+
+    # Resolve provider: use config.provider.default, model from config.extraction
+    provider_name = config.provider.default.lower()
+    model = config.extraction.extraction_model
+
+    if provider_name in ("openai", "local"):
+        from openai import OpenAI
+        client_kwargs: dict = {}
+        if provider_name == "local":
+            import os as _os
+            client_kwargs["base_url"] = _os.getenv(
+                "LACE_LOCAL_LLM_URL", "http://localhost:11434/v1"
+            )
+            client_kwargs["api_key"] = "local"
+
+        client = OpenAI(**client_kwargs)
+        result = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            max_tokens=1024,
+        )
+        return result.choices[0].message.content
+
+    elif provider_name == "anthropic":
+        import anthropic
+        client = anthropic.Anthropic()
+        result = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            system=EXTRACTION_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_content}],
+            temperature=0.1,
+        )
+        return result.content[0].text
+
+    elif provider_name == "ollama":
+        from openai import OpenAI
+        import os as _os
+        ollama_host = config.provider.ollama.host
+        client = OpenAI(base_url=f"{ollama_host}/v1", api_key="ollama")
+        result = client.chat.completions.create(
+            model=config.provider.ollama.model,
+            messages=[
+                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.1,
+            max_tokens=1024,
+        )
+        return result.choices[0].message.content
+
+    else:
+        raise ValueError(
+            f"[Extractor] Unknown LLM provider: '{provider_name}'. "
+            "Expected 'openai', 'anthropic', 'ollama', or 'local'."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Main entry points
+# ---------------------------------------------------------------------------
+
+def extract_memories(
+    query: str,
+    response: str,
+    config=None,
+    log_db_path: _Path = PIPELINE_LOG_DB_PATH,
+) -> list[dict]:
+    """
+    Full worthiness-gated extraction for a single query+response pair.
+
+    Steps:
+      1. Call LLM with EXTRACTION_SYSTEM_PROMPT
+      2. Parse + validate JSON → {worth_remembering, reason, memories}
+      3. Log verdict to pipeline_log.db (if log_all_verdicts=True)
+      4. Gate on worth_remembering (if require_worthiness_verdict=True)
+      5. Return validated memory dicts
+
+    Returns
+    -------
+    list[dict] — ready for dedup_and_store(); empty if gated out or error.
+    """
+    from lace.core.config import LaceConfig as _LaceConfig
+    if config is None:
+        config = _LaceConfig()
+
+    extraction_cfg: _ExtractionConfig = config.extraction
+
+    try:
+        raw = call_llm(query, response, config)
+    except Exception as e:
+        _logger.error(f"[Extractor] LLM call failed: {e}")
+        return []
+
+    parsed = parse_extraction_response(raw)
+    worth = parsed["worth_remembering"]
+    reason = parsed["reason"]
+    memories = parsed["memories"]
+
+    _logger.info(
+        f"[Extractor] Verdict: worth={worth} | "
+        f"memories={len(memories)} | reason='{reason[:80]}'"
+    )
+
+    if extraction_cfg.log_all_verdicts:
+        from lace.memory.normalize import canonical_hash as _ch
+        log_extraction_event(
+            queue_id=-1,
+            worth_remembering=worth,
+            reason=reason,
+            memory_count=len(memories),
+            canonical_hash_value=_ch(f"{query}\n{response}"),
+            db_path=log_db_path,
+        )
+
+    if extraction_cfg.require_worthiness_verdict and not worth:
+        _logger.debug(f"[Extractor] Gated out — reason: {reason}")
+        return []
+
+    return memories
+
+
+def process_queue_item(
+    item,
+    config=None,
+    log_db_path: _Path = PIPELINE_LOG_DB_PATH,
+) -> list[dict]:
+    """
+    Process a single extraction_queue row through the gated pipeline.
+
+    Unlike extract_memories(), this function has access to item["id"]
+    (the queue_id) so pipeline_log rows carry the correct correlation key.
+
+    Returns
+    -------
+    list[dict] — validated memory dicts (may be empty if gated out).
+    """
+    from lace.core.config import LaceConfig as _LaceConfig
+    if config is None:
+        config = _LaceConfig()
+
+    extraction_cfg: _ExtractionConfig = config.extraction
+
+    query: str = item["query"]
+    response: str = item["response"]
+    queue_id: int = item["id"]
+    item_hash: str = item["canonical_hash"]
+
+    try:
+        raw = call_llm(query, response, config)
+    except Exception as e:
+        _logger.error(
+            f"[Extractor] LLM call failed for queue_id={queue_id}: {e}"
+        )
+        return []
+
+    parsed = parse_extraction_response(raw)
+    worth = parsed["worth_remembering"]
+    reason = parsed["reason"]
+    memories = parsed["memories"]
+
+    _logger.info(
+        f"[Extractor] queue_id={queue_id} | worth={worth} | "
+        f"memories={len(memories)} | reason='{reason[:80]}'"
+    )
+
+    if extraction_cfg.log_all_verdicts:
+        log_extraction_event(
+            queue_id=queue_id,
+            worth_remembering=worth,
+            reason=reason,
+            memory_count=len(memories),
+            canonical_hash_value=item_hash,
+            db_path=log_db_path,
+        )
+
+    if extraction_cfg.require_worthiness_verdict and not worth:
+        _logger.debug(
+            f"[Extractor] queue_id={queue_id} gated out. Reason: {reason}"
+        )
+        return []
+
+    return memories

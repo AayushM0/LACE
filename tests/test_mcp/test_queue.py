@@ -93,7 +93,8 @@ class TestEnqueue:
     def test_job_id_is_unique(self, temp_queue_db):
         """Each call to enqueue() returns a different ID."""
         from lace.mcp.queue import enqueue
-        ids = {enqueue(f"query {i}", "response", "global", []) for i in range(10)}
+        words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa"]
+        ids = {enqueue(f"query {words[i]}", "response", "global", []) for i in range(10)}
         assert len(ids) == 10  # All unique
     
     def test_job_status_is_pending(self, temp_queue_db):
@@ -216,8 +217,9 @@ class TestGetPendingJobs:
         
         # Enqueue with small delay to ensure different timestamps
         ids = []
+        words = ["alpha", "beta", "gamma"]
         for i in range(3):
-            ids.append(enqueue(f"query {i}", "r", "global", []))
+            ids.append(enqueue(f"query {words[i]}", "r", "global", []))
             time.sleep(0.01)  # 10ms gap
         
         jobs = get_pending_jobs(limit=3)
@@ -230,8 +232,9 @@ class TestGetPendingJobs:
         """get_pending_jobs respects the limit parameter."""
         from lace.mcp.queue import enqueue, get_pending_jobs
         
+        words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta", "iota", "kappa"]
         for i in range(10):
-            enqueue(f"query {i}", "r", "global", [])
+            enqueue(f"query {words[i]}", "r", "global", [])
         
         assert len(get_pending_jobs(limit=3)) == 3
         assert len(get_pending_jobs(limit=7)) == 7
@@ -309,13 +312,18 @@ class TestWorkerThread:
         """Jobs exceeding max retries are marked permanently failed."""
         from lace.mcp.queue import enqueue, get_job_status, _MAX_RETRIES
         
-        # Manually set retry_count to max to trigger permanent failure
-        job_id = enqueue("test", "response", "global", [])
-        
+        # Insert directly via SQL with high retry_count to avoid race conditions with running daemon threads
+        import datetime
+        import uuid
+        job_id = str(uuid.uuid4())
         conn = sqlite3.connect(str(temp_queue_db))
-        conn.execute(
-            "UPDATE extraction_queue SET retry_count = ? WHERE id = ?",
-            (_MAX_RETRIES + 1, job_id),
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO extraction_queue (id, query, response, scope, history_json, status, retry_count, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (job_id, "test", "response", "global", "[]", "pending", _MAX_RETRIES + 1, datetime.datetime.now(datetime.timezone.utc).isoformat())
         )
         conn.commit()
         conn.close()

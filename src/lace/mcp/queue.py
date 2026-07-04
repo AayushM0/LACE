@@ -57,7 +57,9 @@ CREATE TABLE IF NOT EXISTS extraction_queue (
     created_at    TEXT NOT NULL,
     processed_at  TEXT,
     retry_count   INTEGER DEFAULT 0,
-    error_msg     TEXT
+    error_msg     TEXT,
+    canonical_hash TEXT,
+    repeat_count   INTEGER DEFAULT 0
 );
 """
 
@@ -87,6 +89,12 @@ def init_queue_db() -> None:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     try:
         conn.execute(_CREATE_TABLE_SQL)
+        # Migrate old schema if canonical_hash column is missing
+        try:
+            conn.execute("ALTER TABLE extraction_queue ADD COLUMN canonical_hash TEXT")
+            conn.execute("ALTER TABLE extraction_queue ADD COLUMN repeat_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass # Columns already exist
         conn.execute(_CREATE_INDEX_SQL)
         conn.commit()
         logger.debug(f"Queue DB initialized at {db_path}")
@@ -119,6 +127,12 @@ def _get_connection() -> sqlite3.Connection:
     # gracefully if the database file is deleted/reset while the server is running.
     try:
         conn.execute(_CREATE_TABLE_SQL)
+        # Migrate old schema if canonical_hash column is missing
+        try:
+            conn.execute("ALTER TABLE extraction_queue ADD COLUMN canonical_hash TEXT")
+            conn.execute("ALTER TABLE extraction_queue ADD COLUMN repeat_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass # Columns already exist
         conn.execute(_CREATE_INDEX_SQL)
         conn.commit()
     except Exception as e:
@@ -137,48 +151,126 @@ def enqueue(
     response: str,
     scope: str,
     history: list[dict],
+    config = None,
+    log_db_path = None,
 ) -> str:
     """
-    Inserts a new extraction job with status=pending.
-    
-    Returns the job ID immediately. This function must complete in
-    < 5ms — it only does a single SQLite INSERT, no LLM calls,
-    no embeddings, no file I/O beyond the DB write.
-    
-    Args:
-        query:    The user's original message
-        response: The agent's complete response
-        scope:    Resolved scope string (e.g. "global", "project:lace")
-        history:  Last N conversation turns for context
-    
-    Returns:
-        job_id: UUID string identifying this job
+    Inserts a new extraction job with status=pending, implementing canonical hash suppression.
     """
-    job_id = str(uuid4())
-    created_at = datetime.now(timezone.utc).isoformat()
-    history_json = json.dumps(history, ensure_ascii=False)
+    from lace.memory.normalize import canonical_hash
+    from lace.core.config import load_config, get_lace_home
+    from lace.memory.pipeline_log import log_queue_suppressed, PIPELINE_LOG_DB_PATH
+    
+    if config is None:
+        try:
+            config = load_config(get_lace_home())
+        except Exception:
+            from lace.core.config import LaceConfig
+            config = LaceConfig()
+            
+    cooldown = config.dedup.hash_cooldown_seconds
+    h = canonical_hash(f"{query}\n{response}")
     
     conn = _get_connection()
     try:
+        now = datetime.now(timezone.utc)
+        
+        # Check for duplicate pending job within cooldown window
+        cursor = conn.execute(
+            """
+            SELECT id, repeat_count, created_at FROM extraction_queue
+            WHERE canonical_hash = ? AND status = 'pending' AND scope = ?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (h, scope),
+        )
+        existing = cursor.fetchone()
+        
+        if existing:
+            try:
+                created_dt = datetime.fromisoformat(existing["created_at"])
+                age = (now - created_dt).total_seconds()
+            except Exception:
+                age = 999999.0
+                
+            if age <= cooldown:
+                new_repeat_count = (existing["repeat_count"] or 0) + 1
+                conn.execute(
+                    """
+                    UPDATE extraction_queue
+                    SET repeat_count = ?
+                    WHERE id = ?
+                    """,
+                    (new_repeat_count, existing["id"]),
+                )
+                conn.commit()
+                
+                # Log queue suppressed event
+                actual_log_path = log_db_path if log_db_path is not None else PIPELINE_LOG_DB_PATH
+                log_queue_suppressed(
+                    canonical_hash_value=h,
+                    queue_id=existing["id"],
+                    repeat_count=new_repeat_count,
+                    db_path=actual_log_path,
+                )
+                
+                logger.debug(f"[Queue] SUPPRESSED | hash={h[:12]}... | repeat_count={new_repeat_count}")
+                return existing["id"]
+
+        # Insert new pending job
+        job_id = str(uuid4())
+        created_at = now.isoformat()
+        history_json = json.dumps(history, ensure_ascii=False)
         conn.execute(
             """
             INSERT INTO extraction_queue
-                (id, query, response, scope, history_json, status, created_at)
+                (id, query, response, scope, history_json, status, created_at, canonical_hash, repeat_count)
             VALUES
-                (?, ?, ?, ?, ?, 'pending', ?)
+                (?, ?, ?, ?, ?, 'pending', ?, ?, 0)
             """,
-            (job_id, query, response, scope, history_json, created_at),
+            (job_id, query, response, scope, history_json, created_at, h),
         )
         conn.commit()
         logger.debug(f"Enqueued job {job_id} (scope={scope})")
         return job_id
     except Exception as e:
         logger.error(f"Failed to enqueue job: {e}")
-        # Re-raise because if we can't write to the queue, the caller
-        # should know — but this should never fail in practice
         raise
     finally:
         conn.close()
+
+
+def enqueue_interaction(
+    query: str,
+    response: str,
+    config = None,
+    db_path: Optional[Path] = None,
+    log_db_path: Optional[Path] = None,
+) -> dict:
+    """
+    Compatibility wrapper matching the specified enqueue_interaction interface.
+    """
+    from lace.mcp.tools import _mcp_context_project
+    scope = _mcp_context_project or "global"
+    if not scope.startswith("project:") and scope != "global":
+        scope = f"project:{scope}"
+        
+    from lace.memory.pipeline_log import PIPELINE_LOG_DB_PATH
+    actual_log_path = log_db_path if log_db_path is not None else PIPELINE_LOG_DB_PATH
+    
+    job_id = enqueue(
+        query=query,
+        response=response,
+        scope=scope,
+        history=[],
+        config=config,
+        log_db_path=actual_log_path,
+    )
+    return {
+        "status": "queued",
+        "job_id": job_id,
+        "scope_used": scope,
+    }
 
 
 def mark_processing(job_id: str) -> None:
@@ -281,7 +373,7 @@ def get_pending_jobs(limit: int = _WORKER_BATCH_SIZE) -> list[dict]:
             """
             SELECT id, query, response, scope, history_json,
                    status, created_at, processed_at,
-                   retry_count, error_msg
+                   retry_count, error_msg, canonical_hash, repeat_count
             FROM extraction_queue
             WHERE status = 'pending'
             ORDER BY created_at ASC

@@ -752,13 +752,17 @@ async def process_interaction(
             pass
 
     # Safe scope resolution — handle both prefixed and unprefixed values
-    if _mcp_context_project:
-        project = _mcp_context_project
-        if not project.startswith("project:"):
-            project = f"project:{project}"
-        resolved_scope = project
+    if scope == "auto" or not scope:
+        if _mcp_context_project:
+            project = _mcp_context_project
+            if not project.startswith("project:"):
+                project = f"project:{project}"
+            resolved_scope = project
+        else:
+            resolved_scope = "global"
     else:
-        resolved_scope = "global"
+        from lace.core.scope import normalize_scope
+        resolved_scope = normalize_scope(scope)
 
     try:
         job_id = enqueue(
@@ -820,10 +824,14 @@ async def initialize_lace_session(
     except Exception:
         _mcp_context_project = Path(cwd).name
 
+    from lace.mcp.resources import get_instructions_resource
+    instructions_text = await get_instructions_resource()
+
     return {
-        "status": "initialized",
+        "status": "active",
         "project": _mcp_context_project,
         "cwd": _mcp_context_cwd,
+        "instructions": instructions_text,
         "message": (
             f"LACE session active for project: "
             f"{_mcp_context_project}. "
