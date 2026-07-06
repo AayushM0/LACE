@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lace.core.config import LaceConfig, get_lace_home, load_config
+from lace.core.config import LaceConfig, get_lace_home, load_config, resolve_lace_paths
 from lace.core.scope import get_active_scope
 from lace.memory.markdown import (
     load_all_memories,
@@ -12,6 +12,7 @@ from lace.memory.markdown import (
     save_memory_to_file,
 )
 from lace.memory.models import (
+    Confidence,
     MemoryCategory,
     MemoryLifecycle,
     MemoryObject,
@@ -38,8 +39,9 @@ class MemoryStore:
     ) -> None:
         self.lace_home   = lace_home or get_lace_home()
         self.config      = config or load_config(self.lace_home)
+        paths            = resolve_lace_paths(self.lace_home)
         self.vault_path  = self.config.vault_path(self.lace_home)
-        self.vector_db_path = self.lace_home / "memory" / "vector_db"
+        self.vector_db_path = paths["vector_db"]
         self.active_scope   = active_scope or "global"
         self._logger        = None   # lazy loaded
 
@@ -65,8 +67,12 @@ class MemoryStore:
         try:
             from lace.retrieval.vector import upsert_memory
             upsert_memory(memory, self.vector_db_path)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger("lace.store").error(
+                f"Failed to upsert memory {memory.id} to vector store: {e}",
+                exc_info=True
+            )
 
     # ── NEW: Initialization ───────────────────────────────────────────────────
 
@@ -91,7 +97,8 @@ class MemoryStore:
         tag_count = self._tag_index.tag_count()
 
         # 3. Load persisted graph
-        graph_path = self.lace_home / "memory" / "graph.json"
+        paths = resolve_lace_paths(self.lace_home)
+        graph_path = paths["graph"]
         loaded_edges = self._graph.load(graph_path)
 
         # 4. Run batch graph builder
@@ -102,19 +109,19 @@ class MemoryStore:
         total_edge_count = self._graph.edge_count()
 
         # 6. Load persisted co-retrieval tracker
-        co_path = self.lace_home / "memory" / "co_retrieval.json"
+        co_path = paths["co_retrieval"]
         self._co_tracker.load(co_path)
 
         # 7. Set co-tracker save path
         self._co_tracker.set_save_path(co_path)
 
         # 8. Create UnifiedRetriever
-        def vector_search_wrapper(query: str, n_results: int) -> list[dict]:
+        def vector_search_wrapper(query: str, n_results: int, scope: str) -> list[dict]:
             try:
                 from lace.retrieval.embeddings import embed_text
                 from lace.retrieval.vector import multi_scope_vector_search
 
-                scopes = self._get_search_scopes(self.active_scope)
+                scopes = self._get_search_scopes(scope)
                 query_embedding = embed_text(
                     query, model_name=self._get_model_name()
                 )
@@ -125,6 +132,13 @@ class MemoryStore:
                     n_results=n_results,
                 )
             except Exception:
+                import logging as _log
+                _log.getLogger("lace.store").error(
+                    "vector_search_wrapper failed — vector results unavailable for this query. "
+                    "Memories stored while embeddings are broken will not appear in vector search "
+                    "until 'lace memory reindex' is run.",
+                    exc_info=True,
+                )
                 return []
 
         self._unified = UnifiedRetriever(
@@ -217,8 +231,16 @@ class MemoryStore:
         # Generate embedding
         try:
             memory.embedding = self._embed(content)
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger("lace.store").error(
+                f"Embedding generation failed for memory {memory.id}: {e} — "
+                "memory will be stored in the vault but will NOT appear in vector search. "
+                "Set needs_reindex=True and run 'lace memory reindex' to recover.",
+                exc_info=True,
+            )
             memory.embedding = None
+            memory.needs_reindex = True
 
         # Write markdown file (source of truth)
         save_memory_to_file(memory, self.vault_path)
@@ -268,7 +290,8 @@ class MemoryStore:
                 )
 
         # Save the updated graph
-        graph_path = self.lace_home / "memory" / "graph.json"
+        paths = resolve_lace_paths(self.lace_home)
+        graph_path = paths["graph"]
         self._graph.save(graph_path)
 
     def save(self, memory: MemoryObject) -> Path:
@@ -277,7 +300,12 @@ class MemoryStore:
         if memory.embedding is None:
             try:
                 memory.embedding = self._embed(memory.content)
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.getLogger("lace.store").error(
+                    f"Embedding generation failed for memory {memory.id} on save: {e}",
+                    exc_info=True
+                )
                 pass
         self._upsert_to_vector_store(memory)
         return path
@@ -307,10 +335,11 @@ class MemoryStore:
         self._co_tracker.purge_memory(memory_id)
 
         # Force save graph and co-tracker after destructive operation
-        graph_path = self.lace_home / "memory" / "graph.json"
+        paths = resolve_lace_paths(self.lace_home)
+        graph_path = paths["graph"]
         self._graph.save(graph_path)
 
-        co_path = self.lace_home / "memory" / "co_retrieval.json"
+        co_path = paths["co_retrieval"]
         self._co_tracker.save(co_path)
 
     # ── Read ──────────────────────────────────────────────────────────────────
@@ -369,6 +398,7 @@ class MemoryStore:
         scope: str | None = None,
         max_results: int | None = None,
         threshold: float | None = None,
+        min_confidence: Confidence | float | None = None,
     ) -> list[RetrievalResult]:
         """Semantic search using vector similarity + multi-signal ranking."""
         import time
@@ -388,15 +418,21 @@ class MemoryStore:
                     max_results=_max,
                     threshold=_threshold,
                     active_scope=_scope,
+                    min_confidence=min_confidence,
                 )
                 match_type = "unified"
             except Exception:
+                import logging as _log
+                _log.getLogger("lace.store").warning(
+                    "UnifiedRetriever.retrieve() failed — falling back to vector-only search.",
+                    exc_info=True,
+                )
                 # Fallback to vector-only on error
-                results = self._fallback_search(query, _scope, _max, _threshold)
+                results = self._fallback_search(query, _scope, _max, _threshold, min_confidence)
                 match_type = self._detect_match_type(results)
         else:
             # ── Original behavior (not initialized) ───────────────────────
-            results = self._fallback_search(query, _scope, _max, _threshold)
+            results = self._fallback_search(query, _scope, _max, _threshold, min_confidence)
             match_type = self._detect_match_type(results)
 
         latency_ms = (time.perf_counter() - start) * 1000
@@ -420,6 +456,7 @@ class MemoryStore:
         scope: str,
         max_results: int,
         threshold: float,
+        min_confidence: Confidence | float | None = None,
     ) -> list[RetrievalResult]:
         """
         Original vector search + keyword fallback logic.
@@ -428,6 +465,11 @@ class MemoryStore:
         try:
             results = self._vector_search(query, scope, max_results, threshold)
         except Exception:
+            import logging as _log
+            _log.getLogger("lace.store").warning(
+                "_vector_search() failed inside _fallback_search — degrading to keyword-only.",
+                exc_info=True,
+            )
             keyword_results = self.search_keyword(query, limit=max_results)
             results = [
                 RetrievalResult(
@@ -438,6 +480,8 @@ class MemoryStore:
                 )
                 for i, m in enumerate(keyword_results)
             ]
+        if min_confidence is not None:
+            results = [r for r in results if r.memory.confidence >= float(min_confidence)]
         return results
 
     def _detect_match_type(self, results: list[RetrievalResult]) -> str:
@@ -551,8 +595,13 @@ class MemoryStore:
                 upsert_memory(memory, self.vector_db_path)
                 success += 1
             except Exception as e:
-                import traceback
-                traceback.print_exc()
+                import logging
+                logging.getLogger("lace.store").error(
+                    f"Reindex failed for memory {memory.id}: {e}",
+                    exc_info=True,
+                )
+                memory.needs_reindex = True
+                save_memory_to_file(memory, self.vault_path)
                 failure += 1
 
         return success, failure
@@ -627,7 +676,7 @@ class MemoryStore:
 
     def get_review_candidates(
         self,
-        min_confidence: float = 0.7,
+        min_confidence: Confidence | float = 0.7,
         include_zero_access: bool = True,
         limit: int = 50,
     ) -> list[MemoryObject]:
@@ -636,7 +685,7 @@ class MemoryStore:
 
         candidates = []
         for m in memories:
-            if m.confidence < min_confidence:
+            if m.confidence < float(min_confidence):
                 candidates.append(m)
             elif include_zero_access and m.access_count == 0 and m.lifecycle.value == "captured":
                 candidates.append(m)

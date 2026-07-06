@@ -51,13 +51,6 @@ from lace.core.generator import (
     _get_project_root,
 )
 
-from lace.core.config import (
-    get_lace_home,
-    init_lace_home,
-    load_config,
-    set_config_value,
-)
-
 app = typer.Typer(
     name="lace",
     help="LACE — Local AI Context Engine",
@@ -130,6 +123,129 @@ def version() -> None:
     """Show LACE version."""
     from lace import __version__
     console.print(f"[bold]LACE[/bold] v{__version__}")
+
+
+@app.command()
+def doctor() -> None:
+    """Run LACE diagnostic checks."""
+    import sqlite3
+    from collections import Counter
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
+    import json
+    from lace.core.config import resolve_lace_paths, load_config
+    from lace.memory.pipeline_log import initialize_pipeline_log_db
+    from lace.memory.store import load_all_memories
+
+    lace_home = get_lace_home()
+    paths = resolve_lace_paths(lace_home)
+
+    rows: list[list[str]] = []
+
+    def add_check(name: str, passed: bool, detail: str = "") -> None:
+        status_str = "[green]PASS[/green]" if passed else "[red]FAIL[/red]"
+        rows.append([name, status_str, detail])
+
+    # Check database WAL mode
+    def check_db_wal(db_path: Path, init_fn, conn_fn, check_name: str) -> None:
+        try:
+            init_fn(db_path)
+            conn = conn_fn(db_path)
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            conn.close()
+            add_check(check_name, mode == "wal", f"mode={mode}")
+        except Exception as e:
+            add_check(check_name, False, f"error: {e}")
+
+    from lace.mcp.queue import init_queue_db, _get_connection as _get_queue_conn
+    from lace.memory.pipeline_log import _get_connection as _get_log_conn
+
+    check_db_wal(paths["queue_db"], init_queue_db, _get_queue_conn, "journal:queue_db")
+    check_db_wal(paths["pipeline_log"], initialize_pipeline_log_db, _get_log_conn, "journal:pipeline_log")
+
+    # Wiring check
+    try:
+        from lace.memory.dedup import StoreBackedVectorIndex, dedup_and_store
+        from lace.memory.extractor import process_queue_item
+        from lace.memory.store import MemoryStore
+        from lace.retrieval.embeddings import embed_text
+
+        config = load_config(lace_home)
+        store = MemoryStore(lace_home=lace_home, config=config)
+        store.initialize()
+        body = "Doctor round-trip marker for LACE pipeline wiring."
+        fake_item = {
+            "id": "doctor-roundtrip",
+            "query": "doctor pipeline check",
+            "response": body,
+            "scope": "global",
+            "canonical_hash": f"doctor-{datetime.now(timezone.utc).timestamp()}",
+        }
+        fake_llm = json.dumps({
+            "worth_remembering": True,
+            "reason": "Pipeline wiring check with mocked LLM output.",
+            "memories": [{
+                "category": "debug",
+                "summary": body,
+                "body": body,
+                "tags": ["doctor"],
+                "confidence": 0.8,
+            }],
+        })
+        with patch("lace.memory.extractor.call_llm", return_value=fake_llm):
+            extracted = process_queue_item(fake_item, config=config, log_db_path=paths["pipeline_log"])
+        vector_index = StoreBackedVectorIndex(paths["vector_db"])
+        stored_ids: list[str] = []
+        for candidate in extracted:
+            candidate["project_scope"] = "global"
+            new_id = dedup_and_store(
+                candidate=candidate,
+                vector_index=vector_index,
+                memory_store=store,
+                config=config,
+                queue_id=fake_item["id"],
+                hash_index_db_path=paths["hash_index"],
+                log_db_path=paths["pipeline_log"],
+            )
+            if new_id:
+                stored_ids.append(new_id)
+        query_embedding = embed_text(body, model_name=config.embeddings.model)
+        vector_hits = vector_index.query(query_embedding, n_results=3, scope_filter=["global"])
+        found = any(body in hit.memory.content for hit in vector_hits)
+        add_check(
+            "pipeline wiring",
+            found,
+            "mocked LLM round trip; prompt quality not checked here",
+        )
+
+        # Cleanup mock doctor data to prevent production pollution
+        for mem_id in stored_ids:
+            try:
+                store.delete(mem_id)
+            except Exception:
+                pass
+            try:
+                with sqlite3.connect(str(paths["hash_index"])) as conn:
+                    conn.execute("DELETE FROM vault_hash_index WHERE memory_id = ?", (mem_id,))
+                    conn.commit()
+            except Exception:
+                pass
+        try:
+            with sqlite3.connect(str(paths["pipeline_log"])) as conn:
+                conn.execute("DELETE FROM pipeline_log WHERE queue_id = ?", (fake_item["id"],))
+                conn.commit()
+        except Exception:
+            pass
+    except Exception as e:
+        add_check("pipeline wiring", False, f"{e}; prompt quality not checked here")
+
+    table = Table(title="LACE Doctor", show_header=True, header_style="bold cyan", expand=True)
+    table.add_column("Check", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Detail")
+    for row in rows:
+        table.add_row(*row)
+    console.print(table)
 
 
 # ── config commands ───────────────────────────────────────────────────────────

@@ -60,6 +60,7 @@ def memory_to_markdown(memory: MemoryObject) -> str:
             "created_at":    _dt_to_str(memory.created_at),
             "last_accessed": _dt_to_str(memory.last_accessed),
             "access_count":  memory.access_count,
+            "needs_reindex": memory.needs_reindex,
             "related_ids":   memory.related_ids,
             **({"summary": memory.summary} if memory.summary else {}),
             **(memory.metadata if memory.metadata else {}),
@@ -135,6 +136,7 @@ def markdown_to_memory(file_path: Path) -> MemoryObject | None:
             created_at=_str_to_dt(meta.get("created_at")),
             last_accessed=_str_to_dt(meta.get("last_accessed")),
             access_count=int(meta.get("access_count", 0)),
+            needs_reindex=bool(meta.get("needs_reindex", False)),
             related_ids=list(meta.get("related_ids", [])),
             summary=meta.get("summary"),
             file_path=str(file_path),
@@ -143,7 +145,7 @@ def markdown_to_memory(file_path: Path) -> MemoryObject | None:
                 if k not in {
                     "id", "category", "source", "lifecycle", "confidence",
                     "project_scope", "scope", "tags", "created_at", "last_accessed",
-                    "access_count", "related_ids", "summary",
+                    "access_count", "needs_reindex", "related_ids", "summary",
                 }
             },
         )

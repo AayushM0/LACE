@@ -3,6 +3,7 @@ import re
 from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
+from lace.memory.models import Confidence
 
 if TYPE_CHECKING:
     from lace.memory.store import MemoryStore
@@ -116,7 +117,7 @@ def _format_memories_for_prompt(memories: list) -> str:
 def load_memories_for_generation(
     project_scope: str,
     store: MemoryStore,
-    min_confidence: float = 0.65,
+    min_confidence: Confidence | float = 0.65,
     global_relevance_threshold: float = 0.55,
 ) -> dict[str, list]:
     """
@@ -133,7 +134,7 @@ def load_memories_for_generation(
     # Filter by minimum confidence
     project_memories = [
         m for m in all_memories
-        if (m.confidence or 0.0) >= min_confidence
+        if (m.confidence or 0.0) >= float(min_confidence)
     ]
 
     # Extract top tags from project memories for global search

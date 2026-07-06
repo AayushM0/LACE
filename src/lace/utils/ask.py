@@ -233,19 +233,20 @@ def ask(
         try:
             if config.memory.auto_extract and use_memory:
                 from lace.memory.extractor import (
-                    extract_from_conversation,
+                    extract_and_store_memories,
                     should_attempt_extraction,
                 )
                 if should_attempt_extraction(query, response_text):
                     store = MemoryStore(lace_home=lace_home, config=config)
-                    result = extract_from_conversation(
+                    from lace.core.config import resolve_lace_paths
+                    result = extract_and_store_memories(
                         query=query,
                         response=response_text,
                         store=store,
                         scope=resolved_scope,
-                        max_extractions=config.memory.max_extractions_per_turn,
-                        require_confirmation=config.memory.require_confirmation,
-                        provider=provider,
+                        config=config,
+                        dry_run=config.memory.require_confirmation,
+                        log_db_path=resolve_lace_paths(lace_home)["pipeline_log"],
                     )
                     if result.stored:
                         # Print to stderr so it doesn't corrupt stdout

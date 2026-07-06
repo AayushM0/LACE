@@ -394,7 +394,8 @@ Respond ONLY with JSON matching this exact schema — no prose, no markdown, no 
       "category": "<pattern|decision|debug|reference|preference>",
       "summary": "<one clear sentence a developer could read in isolation>",
       "body": "<full context, details, code snippets if relevant>",
-      "tags": ["<tag1>", "<tag2>"]
+      "tags": ["<tag1>", "<tag2>"],
+      "confidence": <float: 0.1-1.0 representing certainty/confidence>
     }
   ]
 }
@@ -414,7 +415,7 @@ Set worth_remembering to TRUE only if the interaction contains:
   - A specific technical decision with reasoning
   - A concrete debugging solution (problem + fix + why it works)
   - A reusable pattern or approach with enough detail to apply again
-  - An explicit user preference about how they work
+  - Explicit user preference about how they work
   - A reference to a specific API, library, or system behavior
 
 RULES FOR memories array:
@@ -423,6 +424,7 @@ RULES FOR memories array:
   - Each memory must be self-contained — readable with no other context
   - summary must be a complete sentence, not a fragment
   - tags must be lowercase, single words or hyphenated-phrases
+  - Do NOT assign the same confidence value (e.g. 0.8) to all memories. Vary it dynamically based on how certain you are (0.1 to 1.0).
 
 CATEGORY DEFINITIONS:
   pattern    — a reusable approach or technique
@@ -477,6 +479,28 @@ def _validate_memory_dict(mem: dict, index: int) -> _Optional[dict]:
         for t in mem["tags"]
         if str(t).strip()
     ]
+
+    confidence = mem.get("confidence")
+    if confidence is None:
+        _logger.warning(f"[Extractor] Memory[{index}] missing confidence. Skipping.")
+        return None
+
+    try:
+        conf_val = float(confidence)
+    except (ValueError, TypeError):
+        _logger.warning(f"[Extractor] Memory[{index}] non-numeric confidence. Skipping.")
+        return None
+
+    if not (0.0 <= conf_val <= 1.0):
+        _logger.warning(f"[Extractor] Memory[{index}] confidence out of bounds. Skipping.")
+        return None
+
+    mem["confidence"] = conf_val
+
+    if conf_val == 0.4:
+        _logger.warning(
+            f"[Extractor] Memory[{index}] has fallback confidence 0.4."
+        )
     return mem
 
 
@@ -648,7 +672,7 @@ def extract_memories(
     query: str,
     response: str,
     config=None,
-    log_db_path: _Path = PIPELINE_LOG_DB_PATH,
+    log_db_path: _Path | None = None,
 ) -> list[dict]:
     """
     Full worthiness-gated extraction for a single query+response pair.
@@ -664,9 +688,12 @@ def extract_memories(
     -------
     list[dict] — ready for dedup_and_store(); empty if gated out or error.
     """
-    from lace.core.config import LaceConfig as _LaceConfig
+    from lace.core.config import LaceConfig as _LaceConfig, resolve_lace_paths
     if config is None:
         config = _LaceConfig()
+
+    if log_db_path is None:
+        log_db_path = resolve_lace_paths(getattr(config, "lace_home", None))["pipeline_log"]
 
     extraction_cfg: _ExtractionConfig = config.extraction
 
@@ -707,7 +734,8 @@ def extract_memories(
 def process_queue_item(
     item,
     config=None,
-    log_db_path: _Path = PIPELINE_LOG_DB_PATH,
+    log_db_path: _Path | None = None,
+    raise_on_llm_error: bool = False,
 ) -> list[dict]:
     """
     Process a single extraction_queue row through the gated pipeline.
@@ -719,9 +747,12 @@ def process_queue_item(
     -------
     list[dict] — validated memory dicts (may be empty if gated out).
     """
-    from lace.core.config import LaceConfig as _LaceConfig
+    from lace.core.config import LaceConfig as _LaceConfig, resolve_lace_paths
     if config is None:
         config = _LaceConfig()
+
+    if log_db_path is None:
+        log_db_path = resolve_lace_paths(getattr(config, "lace_home", None))["pipeline_log"]
 
     extraction_cfg: _ExtractionConfig = config.extraction
 
@@ -736,6 +767,8 @@ def process_queue_item(
         _logger.error(
             f"[Extractor] LLM call failed for queue_id={queue_id}: {e}"
         )
+        if raise_on_llm_error:
+            raise
         return []
 
     parsed = parse_extraction_response(raw)

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable
 
-from lace.memory.models import MemoryObject, RetrievalResult
+from lace.memory.models import MemoryObject, RetrievalResult, Confidence
 
 if TYPE_CHECKING:
     from lace.retrieval.tag_index import TagIndex
@@ -165,7 +165,7 @@ class UnifiedRetriever:
 
     def __init__(
         self,
-        vector_search_fn: Callable[[str, int], list[dict]],
+        vector_search_fn: Callable[[str, int, str], list[dict]],
         get_memory_fn: Callable[[str], MemoryObject | None],
         tag_index: TagIndex,
         graph: MemoryGraph,
@@ -176,7 +176,7 @@ class UnifiedRetriever:
         Create a UnifiedRetriever.
 
         Args:
-            vector_search_fn: Callable(query, n_results) → list of dicts
+            vector_search_fn: Callable(query, n_results, scope) → list of dicts
                               with keys "id" and "distance".
                               This wraps the existing _vector_search logic
                               in MemoryStore.
@@ -202,6 +202,7 @@ class UnifiedRetriever:
         max_results: int = 10,
         threshold: float = 0.35,
         active_scope: str = "global",
+        min_confidence: Confidence | float | None = None,
     ) -> list[RetrievalResult]:
         """
         Run the full multi-signal retrieval pipeline.
@@ -225,7 +226,7 @@ class UnifiedRetriever:
 
         # ── Step 1: Vector Search ─────────────────────────────────────────────
         # Over-fetch to give ranking room to reorder
-        raw_vector = self._vector_search(query, max_results * 3)
+        raw_vector = self._vector_search(query, max_results * 3, active_scope)
 
         for raw in raw_vector:
             mid = raw["id"]
@@ -379,6 +380,7 @@ class UnifiedRetriever:
         passing = [
             c for c in pool.values()
             if c.final_score >= threshold
+            and (min_confidence is None or c.memory.confidence >= float(min_confidence))
         ]
 
         # Sort by final score descending
@@ -390,12 +392,23 @@ class UnifiedRetriever:
         # Convert to RetrievalResult (existing public type)
         results: list[RetrievalResult] = []
         for rank, candidate in enumerate(final_candidates, start=1):
+            scope_bonus = self._compute_scope_score(
+                candidate.memory.project_scope, active_scope
+            )
+            eff_conf = candidate.memory.confidence * 0.7 + scope_bonus * 0.3
             results.append(RetrievalResult(
                 memory=candidate.memory,
                 relevance_score=round(candidate.final_score, 4),
                 match_type=candidate.match_type(),
                 rank=rank,
+                vector_score=round(candidate.vector_score, 4),
+                tag_score=round(candidate.tag_score, 4),
+                graph_score=round(candidate.graph_score, 4),
+                co_retrieval_score=round(candidate.co_retrieval_score, 4),
+                recency_score=round(candidate.recency_score, 4),
+                confidence_score=round(self._weights.confidence * eff_conf, 4),
             ))
+
 
         # Record this retrieval for the co-retrieval tracker
         # MUST happen after we decide what to return, not before

@@ -68,10 +68,20 @@ def llm_response(
     reason: str = "test reason",
     memories: list = None,
 ) -> str:
+    mems = []
+    if memories:
+        for m in memories:
+            if isinstance(m, dict):
+                m_copy = dict(m)
+                if "confidence" not in m_copy:
+                    m_copy["confidence"] = 0.8
+                mems.append(m_copy)
+            else:
+                mems.append(m)
     return json.dumps({
         "worth_remembering": worth,
         "reason": reason,
-        "memories": memories or [],
+        "memories": mems,
     })
 
 
@@ -311,6 +321,7 @@ class TestValidateMemoryDict:
             "summary": "Use context managers for resource cleanup.",
             "body": "Always use with statements for files and DB connections.",
             "tags": ["python", "context-managers"],
+            "confidence": 0.8,
         }
         assert _validate_memory_dict(mem, 0) is not None
 
@@ -321,6 +332,7 @@ class TestValidateMemoryDict:
                 "summary": "Valid summary sentence for this memory.",
                 "body": "Body.",
                 "tags": [],
+                "confidence": 0.8,
             }
             assert _validate_memory_dict(mem, 0) is not None
 
@@ -330,6 +342,7 @@ class TestValidateMemoryDict:
             "summary": "Short",  # < 10 chars
             "body": "Body text here.",
             "tags": ["test"],
+            "confidence": 0.8,
         }
         assert _validate_memory_dict(mem, 0) is None
 
@@ -339,6 +352,7 @@ class TestValidateMemoryDict:
             "summary": "Valid summary sentence here.",
             "body": "Body.",
             "tags": "not-a-list",
+            "confidence": 0.8,
         }
         assert _validate_memory_dict(mem, 0) is None
 
@@ -348,6 +362,7 @@ class TestValidateMemoryDict:
             "summary": "Valid summary sentence that is long enough.",
             "body": "Body.",
             "tags": ["UPPER", "MiXeD"],
+            "confidence": 0.8,
         }
         result = _validate_memory_dict(mem, 0)
         assert result is not None
@@ -359,8 +374,51 @@ class TestValidateMemoryDict:
             "summary": "Valid summary sentence that is long enough.",
             "body": "Body.",
             "tags": [],
+            "confidence": 0.8,
         }
         assert _validate_memory_dict(mem, 0) is None
+
+    def test_missing_confidence_rejected(self):
+        mem = {
+            "category": "pattern",
+            "summary": "Valid summary sentence that is long enough.",
+            "body": "Body content here.",
+            "tags": ["test"],
+        }
+        assert _validate_memory_dict(mem, 0) is None
+
+    def test_non_numeric_confidence_rejected(self):
+        mem = {
+            "category": "pattern",
+            "summary": "Valid summary sentence that is long enough.",
+            "body": "Body content here.",
+            "tags": ["test"],
+            "confidence": "high",
+        }
+        assert _validate_memory_dict(mem, 0) is None
+
+    def test_confidence_out_of_bounds_rejected(self):
+        for conf in (-0.1, 1.1):
+            mem = {
+                "category": "pattern",
+                "summary": "Valid summary sentence that is long enough.",
+                "body": "Body content here.",
+                "tags": ["test"],
+                "confidence": conf,
+            }
+            assert _validate_memory_dict(mem, 0) is None
+
+    def test_coerced_confidence_float(self):
+        mem = {
+            "category": "pattern",
+            "summary": "Valid summary sentence that is long enough.",
+            "body": "Body content here.",
+            "tags": ["test"],
+            "confidence": "0.75",
+        }
+        res = _validate_memory_dict(mem, 0)
+        assert res is not None
+        assert res["confidence"] == 0.75
 
 
 # ---------------------------------------------------------------------------

@@ -125,7 +125,12 @@ def delete_from_vector_store(
     try:
         collection.delete(ids=[memory_id])
     except Exception:
-        pass  # Not in vector store — that's fine
+        import logging
+        logging.getLogger("lace.retrieval.vector").debug(
+            f"delete_from_vector_store: memory {memory_id} not in collection (scope={scope}), skip.",
+            exc_info=True,
+        )
+
 
 
 # ── Search operations ─────────────────────────────────────────────────────────
@@ -171,7 +176,12 @@ def vector_search(
             where=where_filter,
             include=["documents", "metadatas", "distances"],
         )
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.getLogger("lace.retrieval.vector").error(
+            f"ChromaDB collection query failed for scope {scope}: {e}",
+            exc_info=True
+        )
         return []
 
     # Unpack ChromaDB's nested response format

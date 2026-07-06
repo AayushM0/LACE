@@ -150,7 +150,8 @@ def _populate_embeddings(
     from lace.retrieval.vector import get_client, _scope_to_collection_name
     from pathlib import Path
 
-    vector_db_path = Path(lace_home) / "memory" / "vector_db"
+    from lace.core.config import resolve_lace_paths
+    vector_db_path = resolve_lace_paths(Path(lace_home))["vector_db"]
     
     try:
         client = get_client(vector_db_path)
@@ -731,7 +732,7 @@ async def process_interaction(
     """
     Queues a conversation turn for background extraction analysis.
     """
-    from lace.mcp.queue import enqueue
+    from lace.mcp.queue import enqueue_interaction
     import lace.mcp.server as mcp_server
     global _mcp_context_project
 
@@ -765,23 +766,30 @@ async def process_interaction(
         resolved_scope = normalize_scope(scope)
 
     try:
-        job_id = enqueue(
+        enqueue_result = enqueue_interaction(
             query=query,
             response=response,
             scope=resolved_scope,
             history=history_snapshot,
         )
+        job_id = enqueue_result.get("job_id")
 
         logger.debug(f"process_interaction: queued job {job_id} (scope={resolved_scope})")
 
         return {
-            "status": "queued",
+            "status": enqueue_result.get("status", "queued"),
             "job_id": job_id,
+            "queue_id": enqueue_result.get("queue_id", job_id),
+            "action": enqueue_result.get("action", "inserted"),
             "scope_used": resolved_scope,
-            "message": "Extraction queued in background. Results appear in inbox after ~30 seconds.",
+            "message": (
+                "Extraction queued in background. Results appear in inbox after ~30 seconds."
+                if enqueue_result.get("status") == "queued"
+                else enqueue_result.get("error", "Queue unavailable")
+            ),
         }
     except Exception as e:
-        logger.error(f"process_interaction: enqueue failed: {e}")
+        logger.error(f"process_interaction: enqueue failed: {e}", exc_info=True)
         return {
             "status": "error",
             "job_id": None,

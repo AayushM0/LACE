@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 from datetime import datetime, timezone
 
+from lace.core.config import LaceConfig, resolve_lace_paths
 from lace.memory.models import MemoryObject, MemoryLifecycle, MemoryCategory
 from lace.retrieval.embeddings import embed_text
 from lace.memory.normalize import canonical_hash
@@ -164,17 +165,112 @@ def merge_memories(
 # CHUNK 4 — Two-Tier Deduplication Additions
 # ---------------------------------------------------------------------------
 
-VAULT_HASH_INDEX_PATH = Path("~/.lace/memory/vault_hash_index.db").expanduser()
+VAULT_HASH_INDEX_PATH = resolve_lace_paths()["hash_index"]
 
-# Type stub / alias if VectorIndex is not importable
-try:
-    from lace.retrieval.vector import VectorIndex
-except ImportError:
-    class VectorIndex:
-        def query(self, *args, **kwargs):
-            return []
-        def add(self, *args, **kwargs):
-            pass
+# ---------------------------------------------------------------------------
+# VectorIndex interface and production adapter
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass as _dc
+
+
+@_dc
+class VectorSearchResult:
+    """Minimal result type returned by VectorIndex.query()."""
+    memory: "MemoryObject"
+    distance: float
+
+
+class VectorIndex:
+    """Duck-typed interface expected by dedup_and_store().
+
+    Production callers should use StoreBackedVectorIndex.
+    Tests may use MagicMock() with .query.return_value = [].
+    """
+    def query(self, embedding, n_results: int, scope_filter=None):
+        """Return list[VectorSearchResult], nearest neighbours first."""
+        raise NotImplementedError
+
+    def add(self, memory: "MemoryObject", embedding: list[float]) -> None:
+        """Persist a new memory+embedding to the vector store."""
+        raise NotImplementedError
+
+
+class StoreBackedVectorIndex(VectorIndex):
+    """Production VectorIndex that reads/writes ChromaDB via store's vector_db_path.
+
+    This is the canonical adapter for use in _process_single_job and any
+    production caller of dedup_and_store().  Do not use MagicMock() in
+    production code — tests should patch embed_text instead.
+    """
+
+    def __init__(self, vector_db_path: Path) -> None:
+        self._vector_db_path = vector_db_path
+
+    def query(self, embedding, n_results: int, scope_filter=None):
+        from lace.retrieval.vector import get_client, _scope_to_collection_name
+        client = get_client(self._vector_db_path)
+        collections = {c.name: c for c in client.list_collections()}
+
+        results: list[VectorSearchResult] = []
+        for name, collection in collections.items():
+            if scope_filter and not self._scope_matches(name, scope_filter):
+                continue
+            try:
+                raw = collection.query(
+                    query_embeddings=[embedding],
+                    n_results=min(n_results, collection.count() or 1),
+                    include=["documents", "metadatas", "distances"],
+                )
+            except Exception:
+                logger.warning(
+                    "[Dedup] StoreBackedVectorIndex query failed for collection %s",
+                    name,
+                    exc_info=True,
+                )
+                continue
+            ids = raw.get("ids", [[]])[0]
+            distances = raw.get("distances", [[]])[0]
+            metadatas = raw.get("metadatas", [[]])[0]
+            documents = raw.get("documents", [[]])[0]
+            for i, mem_id in enumerate(ids):
+                # Build a minimal MemoryObject stub for dedup scoring
+                meta = metadatas[i] if i < len(metadatas) else {}
+                doc = documents[i] if i < len(documents) else ""
+                from lace.memory.models import MemoryObject
+                try:
+                    mem = MemoryObject.from_chromadb(mem_id, doc, meta)
+                except Exception:
+                    logger.warning(
+                        "[Dedup] Could not parse vector result %s from collection %s",
+                        mem_id,
+                        name,
+                        exc_info=True,
+                    )
+                    continue
+                dist = distances[i] if i < len(distances) else 1.0
+                results.append(VectorSearchResult(memory=mem, distance=dist))
+
+        results.sort(key=lambda r: r.distance)
+        return results[:n_results]
+
+    def add(self, memory: "MemoryObject", embedding: list[float]) -> None:
+        from lace.retrieval.vector import upsert_memory
+        memory.embedding = embedding
+        upsert_memory(memory, self._vector_db_path)
+
+    @staticmethod
+    def _scope_matches(collection_name: str, scope_filter) -> bool:
+        """Return True if the collection name belongs to any scope in the filter."""
+        if isinstance(scope_filter, dict):
+            scopes = scope_filter.get("project_scope", {}).get("$in", [])
+        elif isinstance(scope_filter, list):
+            scopes = scope_filter
+        else:
+            return True  # no filter — include everything
+        from lace.retrieval.vector import _scope_to_collection_name
+        allowed = {_scope_to_collection_name(s) for s in scopes}
+        return not allowed or collection_name in allowed
 
 
 def _get_hash_index_connection(
@@ -399,6 +495,8 @@ def dedup_and_store(
         f"summary='{summary[:60]}'"
     )
 
+    initialize_vault_hash_index(hash_index_db_path)
+
     # -----------------------------------------------------------------------
     # TIER 1: Hash lookup — no embedding call
     # -----------------------------------------------------------------------
@@ -452,7 +550,11 @@ def dedup_and_store(
     try:
         candidate_embedding = embed_text(summary)
     except Exception as e:
-        logger.error(f"[Dedup] Embedding failed: {e}. Storing as new.")
+        logger.error(
+            f"[Dedup] Embedding failed: {e}. Storing as new with needs_reindex=True.",
+            exc_info=True,
+        )
+        candidate["needs_reindex"] = True
         return _store_new(
             candidate, candidate_hash, vector_index,
             memory_store, queue_id, config,
@@ -519,7 +621,8 @@ def dedup_and_store(
             return _store_new(
                 candidate, candidate_hash, vector_index,
                 memory_store, queue_id, config,
-                hash_index_db_path, log_db_path
+                hash_index_db_path, log_db_path,
+                score=similarity
             )
 
         if hasattr(memory_store, "get_by_id"):
@@ -535,7 +638,8 @@ def dedup_and_store(
             return _store_new(
                 candidate, candidate_hash, vector_index,
                 memory_store, queue_id, config,
-                hash_index_db_path, log_db_path
+                hash_index_db_path, log_db_path,
+                score=similarity
             )
 
         updated = merge_into(existing, candidate, reason="embedding_similarity")
@@ -564,7 +668,8 @@ def dedup_and_store(
         return _store_new(
             candidate, candidate_hash, vector_index,
             memory_store, queue_id, config,
-            hash_index_db_path, log_db_path
+            hash_index_db_path, log_db_path,
+            score=similarity
         )
 
 
@@ -581,6 +686,7 @@ def _store_new(
     config: LaceConfig,
     hash_index_db_path: Path,
     log_db_path: Path,
+    score: Optional[float] = None,
 ) -> Optional[str]:
     """
     Store a candidate as a brand new memory.
@@ -588,8 +694,18 @@ def _store_new(
     try:
         if hasattr(memory_store, "create"):
             new_memory = memory_store.create(candidate, config=config)
-            embedding = embed_text(candidate.get("summary", ""))
-            vector_index.add(new_memory, embedding)
+            try:
+                embedding = embed_text(candidate.get("summary", ""))
+                vector_index.add(new_memory, embedding)
+            except Exception as e:
+                logger.error(
+                    f"[Dedup] Embedding/vector indexing failed during store, "
+                    f"proceeding with memory creation: {e}",
+                    exc_info=True,
+                )
+                new_memory.needs_reindex = True
+                if hasattr(memory_store, "save"):
+                    memory_store.save(new_memory)
         else:
             new_memory = memory_store.add(
                 content=candidate.get("body") or candidate.get("content") or candidate.get("summary", ""),
@@ -600,6 +716,9 @@ def _store_new(
                 confidence=candidate.get("confidence", 0.4),
                 summary=candidate.get("summary"),
             )
+            if candidate.get("needs_reindex") and not new_memory.needs_reindex:
+                new_memory.needs_reindex = True
+                memory_store.save(new_memory)
 
         # Update hash index
         insert_hash_index_entry(
@@ -614,7 +733,7 @@ def _store_new(
             canonical_hash_value=candidate_hash,
             action="store",
             target_id=new_memory.id,
-            score=None,
+            score=score,
             queue_id=queue_id,
             db_path=log_db_path,
         )
@@ -626,5 +745,5 @@ def _store_new(
         return new_memory.id
 
     except Exception as e:
-        logger.error(f"[Dedup] STORE failed: {e}")
+        logger.error(f"[Dedup] STORE failed: {e}", exc_info=True)
         return None

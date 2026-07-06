@@ -57,12 +57,12 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Path — single definition, imported by queue.py / extractor.py / dedup.py
+# Path — kept as a compatibility default; resolve_lace_paths() is canonical.
 # ---------------------------------------------------------------------------
 
-PIPELINE_LOG_DB_PATH = Path(
-    "~/.lace/queue/pipeline_log.db"
-).expanduser()
+from lace.core.config import resolve_lace_paths
+
+PIPELINE_LOG_DB_PATH = resolve_lace_paths()["pipeline_log"]
 
 
 # ---------------------------------------------------------------------------

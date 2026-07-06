@@ -54,13 +54,19 @@ def get_model(model_name: str = "all-MiniLM-L6-v2") -> "SentenceTransformer":
                 import transformers
                 transformers.logging.set_verbosity_error()
             except Exception:
-                pass
+                import logging as _log
+                _log.getLogger("lace.retrieval.embeddings").debug(
+                    "Could not suppress transformers logging", exc_info=True
+                )
 
             try:
                 import huggingface_hub
                 huggingface_hub.logging.set_verbosity_error()
             except Exception:
-                pass
+                import logging as _log
+                _log.getLogger("lace.retrieval.embeddings").debug(
+                    "Could not suppress huggingface_hub logging", exc_info=True
+                )
 
             import logging
             logging.getLogger("sentence_transformers").setLevel(logging.ERROR)

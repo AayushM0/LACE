@@ -35,6 +35,64 @@ class MemoryLifecycle(str, Enum):
     ARCHIVED     = "archived"
 
 
+@dataclass(frozen=True)
+class Confidence:
+    """Value object representing memory search/retrieval confidence threshold."""
+    value: float
+
+    def __post_init__(self) -> None:
+        try:
+            val = float(self.value)
+        except (ValueError, TypeError):
+            raise ValueError(f"Confidence value must be a numeric float, got {self.value}")
+        if not 0.0 <= val <= 1.0:
+            raise ValueError(f"Confidence value must be between 0.0 and 1.0, got {self.value}")
+        object.__setattr__(self, "value", val)
+
+    def __float__(self) -> float:
+        return self.value
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, Confidence):
+            return self.value == other.value
+        try:
+            return self.value == float(other)
+        except (ValueError, TypeError):
+            return False
+
+    def __ge__(self, other: Any) -> bool:
+        if isinstance(other, Confidence):
+            return self.value >= other.value
+        try:
+            return self.value >= float(other)
+        except (ValueError, TypeError):
+            return False
+
+    def __gt__(self, other: Any) -> bool:
+        if isinstance(other, Confidence):
+            return self.value > other.value
+        try:
+            return self.value > float(other)
+        except (ValueError, TypeError):
+            return False
+
+    def __le__(self, other: Any) -> bool:
+        if isinstance(other, Confidence):
+            return self.value <= other.value
+        try:
+            return self.value <= float(other)
+        except (ValueError, TypeError):
+            return False
+
+    def __lt__(self, other: Any) -> bool:
+        if isinstance(other, Confidence):
+            return self.value < other.value
+        try:
+            return self.value < float(other)
+        except (ValueError, TypeError):
+            return False
+
+
 # ── MemoryObject ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -57,6 +115,24 @@ class MemoryObject:
     tags: list[str]                         = field(default_factory=list)
     metadata: dict[str, Any]               = field(default_factory=dict)
     file_path: str | None                   = None
+    needs_reindex: bool                     = False  # set True when embedding fails; surfaced by lace doctor
+
+    @classmethod
+    def from_chromadb(cls, id: str, content: str, metadata: dict) -> MemoryObject:
+        """Create a MemoryObject from ChromaDB id, content, and metadata dict."""
+        return cls(
+            id=id,
+            content=content,
+            category=MemoryCategory(metadata.get("category", "pattern")),
+            source=MemorySource(metadata.get("source", "auto_extracted")),
+            project_scope=metadata.get("project_scope", "global"),
+            tags=[t for t in metadata.get("tags", "").split(",") if t],
+            confidence=float(metadata.get("confidence", 0.4)),
+            summary=metadata.get("summary"),
+            lifecycle=MemoryLifecycle(metadata.get("lifecycle", "captured")),
+            access_count=int(metadata.get("access_count", 0)),
+            needs_reindex=bool(metadata.get("needs_reindex", False)),
+        )
 
     def __post_init__(self) -> None:
         """Validate fields after init."""
@@ -98,11 +174,23 @@ class MemoryObject:
 
 @dataclass
 class RetrievalResult:
-    """A memory returned from a search, with its relevance score."""
-    memory: MemoryObject
-    relevance_score: float
-    match_type: str   # "vector", "keyword", "graph", "hybrid"
-    rank: int
+    """A memory returned from a search, with its relevance score and per-signal breakdown.
+
+    The per-signal fields (vector_score, tag_score, …) are always populated when the
+    unified retriever is used, so retrieval bugs can be diagnosed by inspecting a
+    result object directly — no patching of unified.py required.
+    """
+    memory:              MemoryObject
+    relevance_score:     float
+    match_type:          str    # "vector", "keyword", "graph", "hybrid", "unified"
+    rank:                int
+    # Per-signal scores (populated by UnifiedRetriever; 0.0 for fallback/keyword paths)
+    vector_score:        float = 0.0
+    tag_score:           float = 0.0
+    graph_score:         float = 0.0
+    co_retrieval_score:  float = 0.0
+    recency_score:       float = 0.0
+    confidence_score:    float = 0.0   # weight × memory.confidence
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -40,17 +40,20 @@ class TestEndToEndExtractionPipeline:
         
         init_queue_db()
         
-        # Mock LLM provider to return synthetic JSON response
-        mock_provider = MagicMock()
-        mock_provider.complete.return_value = """[
-          {
-            "content": "We decided to use SQLite for the extraction queue.",
-            "category": "decision",
-            "tags": ["sqlite", "queue"],
-            "confidence": 0.75,
-            "reasoning": "Test reasoning"
-          }
-        ]"""
+        # Mock LLM response in the new format
+        fake_llm = """{
+          "worth_remembering": true,
+          "reason": "Test reasoning",
+          "memories": [
+            {
+              "category": "decision",
+              "summary": "We decided to use SQLite for the extraction queue.",
+              "body": "We decided to use SQLite for the extraction queue.",
+              "tags": ["sqlite", "queue"],
+              "confidence": 0.75
+            }
+          ]
+        }"""
         
         # Mock MemoryStore dependencies for ChromaDB to avoid real vector DB issues
         mock_client = MagicMock()
@@ -58,7 +61,7 @@ class TestEndToEndExtractionPipeline:
         mock_client.get_or_create_collection.return_value = mock_collection
         
         with patch("lace.memory.extractor.should_attempt_extraction", return_value=True):
-            with patch("lace.utils.providers.get_provider", return_value=mock_provider):
+            with patch("lace.memory.extractor.call_llm", return_value=fake_llm):
                 with patch("lace.retrieval.vector.get_client", return_value=mock_client):
                     job_id = enqueue(
                         query="How should we handle the extraction queue?",
@@ -135,10 +138,9 @@ class TestEndToEndExtractionPipeline:
             history=[],
         )
         
-        # Simulate worker loop iterations synchronously
         with patch("lace.memory.extractor.should_attempt_extraction", return_value=True):
             with patch(
-                "lace.memory.extractor.extract_from_conversation",
+                "lace.memory.extractor.call_llm",
                 side_effect=RuntimeError("LLM offline"),
             ):
                 for _ in range(_MAX_RETRIES + 2):

@@ -30,6 +30,43 @@ def get_config_dir() -> Path:
     return Path(__file__).parent.parent.parent.parent / "config"
 
 
+def resolve_lace_paths(lace_home: Path | None = None) -> dict[str, Path]:
+    """Return all paths LACE uses, resolved from a single source of truth.
+
+    This is the canonical path resolver. No module should compute its own
+    default path independently — all call sites should use this function.
+
+    Parameters
+    ----------
+    lace_home:
+        The LACE home directory. Defaults to ``get_lace_home()`` if not given.
+
+    Returns
+    -------
+    dict with keys:
+        vault         — markdown memory files
+        vector_db     — ChromaDB persistent store
+        queue_db      — extraction_queue.db (SQLite)
+        pipeline_log  — pipeline_log.db (SQLite)
+        hash_index    — vault_hash_index.db (SQLite)
+        co_retrieval  — co_retrieval.json
+        config_file   — lace.yaml
+        graph         — graph.json
+    """
+    if lace_home is None:
+        lace_home = get_lace_home()
+    return {
+        "vault":         lace_home / "memory" / "vault",
+        "vector_db":     lace_home / "memory" / "vector_db",
+        "queue_db":      lace_home / "queue" / "extraction_queue.db",
+        "pipeline_log":  lace_home / "queue" / "pipeline_log.db",
+        "hash_index":    lace_home / "memory" / "vault_hash_index.db",
+        "co_retrieval":  lace_home / "memory" / "co_retrieval.json",
+        "config_file":   lace_home / "config" / "lace.yaml",
+        "graph":         lace_home / "memory" / "graph.json",
+    }
+
+
 # ── Config models ─────────────────────────────────────────────────────────────
 
 class MemoryConfig(BaseModel):
@@ -191,8 +228,8 @@ class LaceConfig(BaseModel):
 
 # ── Config loader ─────────────────────────────────────────────────────────────
 
-def load_config(lace_home: Path | None = None) -> LaceConfig:
-    """Load configuration from ~/.lace/config/lace.yaml.
+def load_config(lace_home: Path | None = None, cwd: Path | str | None = None) -> LaceConfig:
+    """Load configuration from ~/.lace/config/lace.yaml, then merge project.yaml overrides.
     
     Falls back to defaults if file doesn't exist.
     """
@@ -202,12 +239,66 @@ def load_config(lace_home: Path | None = None) -> LaceConfig:
     config_file = lace_home / "config" / "lace.yaml"
 
     if not config_file.exists():
-        return LaceConfig()
+        config = LaceConfig()
+    else:
+        with open(config_file) as f:
+            raw: dict[str, Any] = yaml.safe_load(f) or {}
+        config = LaceConfig.model_validate(raw)
 
-    with open(config_file) as f:
-        raw: dict[str, Any] = yaml.safe_load(f) or {}
+    # Walk up from cwd to find .lace/project.yaml
+    if cwd is None:
+        cwd = os.getcwd()
+    cwd_path = Path(cwd).resolve()
+    project_file = None
+    for parent in [cwd_path] + list(cwd_path.parents):
+        candidate = parent / ".lace" / "project.yaml"
+        if candidate.exists():
+            project_file = candidate
+            break
 
-    return LaceConfig.model_validate(raw)
+    if project_file:
+        try:
+            with open(project_file) as f:
+                proj_data = yaml.safe_load(f) or {}
+            
+            # Apply noise profile if set
+            noise_profile = (
+                proj_data.get("extraction", {}).get("noise_profile") or
+                proj_data.get("dedup", {}).get("noise_profile")
+            )
+            if noise_profile == "low":
+                config.dedup.merge_threshold = 0.80
+                config.dedup.skip_threshold = 0.90
+                config.dedup.hash_cooldown_seconds = 600
+            elif noise_profile == "medium":
+                config.dedup.merge_threshold = 0.85
+                config.dedup.skip_threshold = 0.95
+                config.dedup.hash_cooldown_seconds = 300
+            elif noise_profile == "high":
+                config.dedup.merge_threshold = 0.90
+                config.dedup.skip_threshold = 0.98
+                config.dedup.hash_cooldown_seconds = 900
+
+            # Apply individual overrides
+            ext_data = proj_data.get("extraction", {})
+            if "require_worthiness_verdict" in ext_data:
+                config.extraction.require_worthiness_verdict = bool(ext_data["require_worthiness_verdict"])
+
+            dedup_data = proj_data.get("dedup", {})
+            if "skip_threshold" in dedup_data:
+                config.dedup.skip_threshold = float(dedup_data["skip_threshold"])
+            if "merge_threshold" in dedup_data:
+                config.dedup.merge_threshold = float(dedup_data["merge_threshold"])
+            if "hash_cooldown_seconds" in dedup_data:
+                config.dedup.hash_cooldown_seconds = int(dedup_data["hash_cooldown_seconds"])
+        except Exception as e:
+            import logging as _log
+            _log.getLogger("lace.core.config").warning(
+                f"Failed to load project config overrides from {project_file}: {e}",
+                exc_info=True,
+            )
+
+    return config
 
 
 def save_config(config: LaceConfig, lace_home: Path | None = None) -> None:
