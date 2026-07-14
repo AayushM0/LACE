@@ -28,6 +28,8 @@ If a proposed change contradicts an existing ADR, flag it explicitly in the plan
 
 Issues and PRDs live as markdown files under the `.scratch/` directory.
 
+> **Note on Absence:** The `.scratch/` directory and its issue files are created dynamically or lazily when feature scopes are triaged or active development begins. If `.scratch/` does not exist, the workspace is in a clean baseline state; proceed silently.
+
 ### 2.1 Directory Structure & Conventions
 * **Feature Scope**: One directory per feature: `.scratch/<feature-slug>/`
 * **Product Requirements**: PRDs are saved at `.scratch/<feature-slug>/PRD.md`

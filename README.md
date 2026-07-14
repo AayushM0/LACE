@@ -11,12 +11,13 @@
 
 * **Persistent Local Memory**: Stored as human-readable Markdown files (`~/.lace/memory/vault`) and indexed with ChromaDB.
 * **Context-Aware Scoping**: Manage memories across multiple scopes—**Global**, **Project-specific** (auto-detected via Git trees), and **Ephemeral Session** scopes.
-* **5-Signal Retrieval & Ranking**: Uses a composite relevance score `[0.0 - 1.0]` combining:
+* **6-Signal Retrieval & Ranking**: Uses a composite relevance score `[0.0 - 1.0]` combining:
   * Semantic Similarity (ChromaDB vector distance)
+  * Tag Expansion (queries scanned for explicit keyword tags)
+  * Knowledge Graph Context (NetworkX topological neighbors)
+  * Co-Retrieval Boost (frequency-based usage co-occurrence)
   * Recency Decay (time-based relevance halving)
-  * Access Frequency (log-scale frequency boosting)
   * Confidence Ratings (user-supplied helpfulness/feedback)
-  * Scope-Matching Bonus (preferring current project/session memories)
 * **Smart Deduplication & Merging**: Evaluates similarity during ingestion:
   * **> 95% similarity**: Skips saving to avoid bloating.
   * **85% - 95% similarity**: Automatically merges content and tags into the existing memory note.
@@ -99,7 +100,7 @@ lace config show
 lace config set provider.default "openai"
 
 # Adjust retrieval weights
-lace config set retrieval.weights.semantic_similarity 0.50
+lace config set retrieval.weights.vector 0.50
 lace config set retrieval.weights.recency 0.15
 ```
 
@@ -169,14 +170,14 @@ LACE exposes a rich set of tools and resources over the Model Context Protocol (
 
 ### Exposed Tools
 * **`initialize_lace_session(working_directory)`**: Establishes the current project scope dynamically by traversing parents of `working_directory` for a Git repository or `.lace/project.yaml`.
-* **`get_relevant_context(query)`**: Retrieves a compressed, prioritized markdown context block containing relevant decisions, preference files, patterns, and runbooks matching `query` from active scopes.
-* **`process_interaction(query, response, context_hint)`**: Enqueues conversation turns into the extraction worker queue to asynchronously evaluate, extract, and write new memory notes.
-* **`remember(content, category, tags, scope, confidence)`**: Explicitly adds a memory note to the vault and vector database.
-* **`search_memory(query, scope, max_results)`**: Semantically queries the vector database with five-signal score ranking.
-* **`list_memories(scope, category)`**: Lists all memories matching criteria.
+* **`get_relevant_context(query, scope)`**: Retrieves a compressed, prioritized markdown context block containing relevant decisions, preference files, patterns, and runbooks matching `query` from active scopes.
+* **`process_interaction(query, response, scope, context_hint)`**: Enqueues conversation turns into the extraction worker queue to asynchronously evaluate, extract, and write new memory notes.
+* **`remember(content, category, tags, scope, summary, body)`**: Explicitly adds a memory note to the vault and vector database. Accepts legacy `summary`/`body` arguments as optional fallbacks.
+* **`search_memory(query, scope, max_results, category)`**: Semantically queries the vector database with six-signal score ranking.
+* **`list_memories(scope, category, limit, lifecycle)`**: Lists all memories matching criteria.
 * **`forget_memory(memory_id)`**: Archives a memory note, disabling it from subsequent retrievals.
-* **`get_project_context(project_name)`**: Retrieves structured onboarding information for a project.
-* **`get_related_concepts(concept)`**: Traverses the NetworkX concept graph.
+* **`get_project_context()`**: Retrieves structured onboarding information, identity, and active preferences for the current project.
+* **`get_related_concepts(concept, depth, memories_only)`**: Traverses the NetworkX concept graph.
 
 ### Exposed Resources
 * **`memory://instructions`**: The active memory protocol rules and requirements.

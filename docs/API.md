@@ -56,11 +56,13 @@ Asynchronously enqueues a completed conversation turn to be analyzed by the back
 Explicitly writes a new memory note into the markdown vault and indexes it into the local vector database.
 
 * **Arguments**:
-  * `content` (string, required): The complete knowledge or information to store.
+  * `content` (string, required): The core knowledge text to store.
+  * `summary` (string, optional, legacy): Fallback concise description. Used in combination with `body` if `content` is omitted.
+  * `body` (string, optional, legacy): Fallback detailed explanation. Used in combination with `summary` if `content` is omitted.
   * `category` (string, required): One of `decision`, `pattern`, `preference`, `reference`, `debug`.
   * `tags` (array of strings, required): Tags for structural graphing and search indexing.
   * `scope` (string, optional): Specific scope (e.g. `global` or `project:name`).
-  * `confidence` (number, optional, default: `0.7`): Score indicating information reliability.
+  * `confidence` (number, optional, default: `0.8`): Score indicating information reliability.
 * **Returns**:
   ```json
   {

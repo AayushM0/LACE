@@ -155,15 +155,23 @@ def markdown_to_memory(file_path: Path) -> MemoryObject | None:
 
 
 def load_all_memories(vault_path: Path) -> list[MemoryObject]:
-    """Load every memory file from the vault directory.
+    """Load every memory file from the vault directory in parallel.
 
     Walks the entire vault recursively and parses every .md file.
     Skips files that are not valid memory files (no 'id' in frontmatter).
     """
-    memories: list[MemoryObject] = []
+    from concurrent.futures import ThreadPoolExecutor
 
-    for md_file in sorted(vault_path.rglob("*.md")):
-        memory = markdown_to_memory(md_file)
+    md_files = sorted(vault_path.rglob("*.md"))
+    if not md_files:
+        return []
+
+    # Parse files in parallel using a thread pool to avoid synchronous I/O blocking
+    with ThreadPoolExecutor() as executor:
+        results = executor.map(markdown_to_memory, md_files)
+
+    memories: list[MemoryObject] = []
+    for memory in results:
         if memory is not None:
             memories.append(memory)
 
