@@ -327,6 +327,10 @@ def create_server() -> Server:
                             "description": "auto, global, or project:<name>",
                             "default": "auto",
                         },
+                        "context_hint": {
+                            "type": "string",
+                            "description": "Optional category: debugging_insight, architectural_decision, user_preference, repeated_action, general_knowledge",
+                        },
                     },
                     "required": ["query", "response"],
                 },
@@ -409,6 +413,7 @@ def create_server() -> Server:
                     query=arguments["query"],
                     response=arguments["response"],
                     scope=arguments.get("scope", "auto"),
+                    context_hint=arguments.get("context_hint"),
                 )
             elif name == "initialize_lace_session":
                 result = await initialize_lace_session(

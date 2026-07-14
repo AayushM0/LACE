@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -80,11 +80,38 @@ class MemoryConfig(BaseModel):
 
 
 class RetrievalWeights(BaseModel):
-    semantic_similarity: float = 0.40
-    recency: float = 0.20
-    frequency: float = 0.15
-    confidence: float = 0.15
-    scope: float = 0.10
+    vector: float = 0.45
+    tag: float = 0.15
+    graph: float = 0.15
+    co_retrieval: float = 0.10
+    recency: float = 0.10
+    confidence: float = 0.05
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_old_keys(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Check if any old keys exist and map them
+            if "semantic_similarity" in data:
+                data["vector"] = data.pop("semantic_similarity")
+            if "frequency" in data:
+                data["co_retrieval"] = data.pop("frequency")
+            if "scope" in data:
+                scope_val = data.pop("scope")
+                # Split scope value between tag and graph
+                data["tag"] = scope_val / 2.0
+                data["graph"] = scope_val / 2.0
+        return data
+
+    @model_validator(mode="after")
+    def validate_sum(self) -> RetrievalWeights:
+        total = (
+            self.vector + self.tag + self.graph
+            + self.co_retrieval + self.recency + self.confidence
+        )
+        if abs(total - 1.0) > 0.01:
+            raise ValueError(f"Retrieval weights must sum to 1.0, got {total:.3f}")
+        return self
 
 
 class RetrievalConfig(BaseModel):

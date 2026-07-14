@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS extraction_queue (
     retry_count   INTEGER DEFAULT 0,
     error_msg     TEXT,
     canonical_hash TEXT,
-    repeat_count   INTEGER DEFAULT 0
+    repeat_count   INTEGER DEFAULT 0,
+    context_hint   TEXT
 );
 """
 
@@ -91,12 +92,19 @@ def init_queue_db(db_path: Optional[Path] = None) -> None:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     try:
         conn.execute(_CREATE_TABLE_SQL)
-        # Migrate old schema if canonical_hash column is missing
+        # Migrate old schema if columns are missing
         try:
             conn.execute("ALTER TABLE extraction_queue ADD COLUMN canonical_hash TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
             conn.execute("ALTER TABLE extraction_queue ADD COLUMN repeat_count INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
-            pass # Columns already exist
+            pass
+        try:
+            conn.execute("ALTER TABLE extraction_queue ADD COLUMN context_hint TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.execute(_CREATE_INDEX_SQL)
         # Recover stuck jobs from previous crashed runs
         conn.execute(
@@ -166,6 +174,7 @@ def enqueue(
     config = None,
     log_db_path = None,
     db_path: Optional[Path] = None,
+    context_hint: Optional[str] = None,
 ) -> str:
     """
     Inserts a new extraction job with status=pending, implementing canonical hash suppression.
@@ -247,11 +256,11 @@ def enqueue(
         conn.execute(
             """
             INSERT INTO extraction_queue
-                (id, query, response, scope, history_json, status, created_at, canonical_hash, repeat_count)
+                (id, query, response, scope, history_json, status, created_at, canonical_hash, repeat_count, context_hint)
             VALUES
-                (?, ?, ?, ?, ?, 'pending', ?, ?, 0)
+                (?, ?, ?, ?, ?, 'pending', ?, ?, 0, ?)
             """,
-            (job_id, query, response, scope, history_json, created_at, h),
+            (job_id, query, response, scope, history_json, created_at, h, context_hint),
         )
         conn.commit()
         logger.debug(f"Enqueued job {job_id} (scope={scope})")
@@ -271,6 +280,7 @@ def enqueue_interaction(
     log_db_path: Optional[Path] = None,
     scope: Optional[str] = None,
     history: Optional[list[dict]] = None,
+    context_hint: Optional[str] = None,
 ) -> dict:
     """
     Compatibility wrapper matching the enqueue_interaction interface.
@@ -297,6 +307,7 @@ def enqueue_interaction(
         "response": response,
         "scope": scope,
         "history": history or [],
+        "context_hint": context_hint,
     }
     if config is not None:
         enqueue_kwargs["config"] = config

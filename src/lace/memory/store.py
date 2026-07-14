@@ -141,13 +141,31 @@ class MemoryStore:
                 )
                 return []
 
+        retrieval_weights = UnifiedWeights()
+        if self.config and hasattr(self.config, "retrieval") and hasattr(self.config.retrieval, "weights"):
+            cfg_w = self.config.retrieval.weights
+            try:
+                retrieval_weights = UnifiedWeights(
+                    vector=cfg_w.vector,
+                    tag=cfg_w.tag,
+                    graph=cfg_w.graph,
+                    co_retrieval=cfg_w.co_retrieval,
+                    recency=cfg_w.recency,
+                    confidence=cfg_w.confidence
+                )
+            except Exception as e:
+                import logging as _log
+                _log.getLogger("lace.store").warning(
+                    f"Invalid weights configuration, using defaults: {e}"
+                )
+
         self._unified = UnifiedRetriever(
             vector_search_fn=vector_search_wrapper,
             get_memory_fn=self.get,
             tag_index=self._tag_index,
             graph=self._graph,
             co_tracker=self._co_tracker,
-            weights=UnifiedWeights(),
+            weights=retrieval_weights,
         )
 
         # 9. Mark as initialized

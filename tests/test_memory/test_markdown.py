@@ -35,7 +35,7 @@ def test_global_memory_saved_in_correct_location(tmp_path):
     """Global pattern memory goes to vault/global/pattern/."""
     memory = make_memory("Test pattern", category=MemoryCategory.PATTERN)
     path = save_memory_to_file(memory, tmp_path)
-    assert "global/pattern" in str(path)
+    assert "global/pattern" in path.as_posix()
     assert path.name == f"{memory.id}.md"
 
 
@@ -43,7 +43,8 @@ def test_project_memory_saved_in_correct_location(tmp_path):
     """Project memory goes to vault/projects/<name>/."""
     memory = make_memory("Test", scope="project:my-api")
     path = save_memory_to_file(memory, tmp_path)
-    assert "projects/my-api" in str(path)
+    assert "projects/my-api" in path.as_posix()
+
 
 
 def test_markdown_file_has_frontmatter(tmp_path):

@@ -727,6 +727,7 @@ async def process_interaction(
     query: str,
     response: str,
     scope: str = "auto",
+    context_hint: str | None = None,
     **kwargs
 ) -> dict:
     """
@@ -771,6 +772,7 @@ async def process_interaction(
             response=response,
             scope=resolved_scope,
             history=history_snapshot,
+            context_hint=context_hint,
         )
         job_id = enqueue_result.get("job_id")
 

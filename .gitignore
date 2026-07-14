@@ -11,3 +11,8 @@ wheels/
 
 # Local scratch files & mock vaults
 scratch/
+
+# Environment files
+.env
+.env.local
+.env.*

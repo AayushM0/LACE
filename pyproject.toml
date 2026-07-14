@@ -14,7 +14,6 @@ dependencies = [
     "sentence-transformers>=3.0.0",
     "chromadb>=0.5.0",
     "numpy>=1.26.0",
-    "python-dotenv>=1.0.0",
     "gitpython>=3.1.43",
     "mcp>=1.0.0",
     "ollama>=0.6.1",

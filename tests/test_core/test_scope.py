@@ -27,6 +27,10 @@ def test_validate_scope_invalid():
     assert validate_scope("invalid") is False
     assert validate_scope("") is False
     assert validate_scope("project:") is False
+    assert validate_scope("project:../escape") is False
+    assert validate_scope("project:subfolder/escape") is False
+    assert validate_scope("project:subfolder\\escape") is False
+    assert validate_scope("session:../escape") is False
 
 
 def test_normalize_scope_global():

@@ -33,13 +33,41 @@ def test_config_weights_sum_to_one():
     config = LaceConfig()
     weights = config.retrieval.weights
     total = (
-        weights.semantic_similarity
+        weights.vector
+        + weights.tag
+        + weights.graph
+        + weights.co_retrieval
         + weights.recency
-        + weights.frequency
         + weights.confidence
-        + weights.scope
     )
     assert abs(total - 1.0) < 0.001
+
+
+def test_config_invalid_weights_sum():
+    """Retrieval weights that do not sum to 1.0 should raise validation error."""
+    from pydantic import ValidationError
+    from lace.core.config import RetrievalWeights
+    with pytest.raises(ValidationError):
+        RetrievalWeights(vector=0.2, tag=0.2)
+
+
+def test_config_migrate_old_keys():
+    """RetrievalWeights should migrate old config keys successfully."""
+    from lace.core.config import RetrievalWeights
+    old_data = {
+        "semantic_similarity": 0.40,
+        "recency": 0.20,
+        "frequency": 0.15,
+        "confidence": 0.15,
+        "scope": 0.10
+    }
+    weights = RetrievalWeights.model_validate(old_data)
+    assert weights.vector == 0.40
+    assert weights.recency == 0.20
+    assert weights.co_retrieval == 0.15
+    assert weights.confidence == 0.15
+    assert weights.tag == 0.05
+    assert weights.graph == 0.05
 
 
 def test_init_creates_directory_structure(tmp_path):
@@ -137,7 +165,8 @@ def test_vault_path_custom():
     """vault_path respects custom path when set."""
     config = LaceConfig()
     config.vault.path = "/custom/vault"
-    assert config.vault_path(Path("/anything")) == Path("/custom/vault")
+    assert config.vault_path(Path("/anything")) == Path("/custom/vault").resolve()
+
 
 
 # ── Chunk 1: DedupConfig tests ────────────────────────────────────────────────

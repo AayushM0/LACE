@@ -151,9 +151,11 @@ def validate_scope(scope: str) -> bool:
     if scope == "global":
         return True
     if scope.startswith("session:") and len(scope) > 8:
-        return True
+        id_part = scope[8:]
+        return ".." not in id_part and "/" not in id_part and "\\" not in id_part
     if scope.startswith("project:") and len(scope) > 8:
-        return True
+        name_part = scope[8:]
+        return ".." not in name_part and "/" not in name_part and "\\" not in name_part
     return False
 
 

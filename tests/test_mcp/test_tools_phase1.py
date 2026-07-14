@@ -203,6 +203,7 @@ class TestProcessInteraction:
             response="my response",
             scope="project:lace",
             history=[{"query": "prev", "response": "prev r"}],
+            context_hint=None,
         )
     
     @pytest.mark.asyncio

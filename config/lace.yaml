@@ -13,11 +13,12 @@ retrieval:
   relevance_threshold: 0.35
   max_results: 20
   weights:
-    semantic_similarity: 0.40
-    recency: 0.20
-    frequency: 0.15
-    confidence: 0.15
-    scope: 0.10
+    vector: 0.45
+    tag: 0.15
+    graph: 0.15
+    co_retrieval: 0.10
+    recency: 0.10
+    confidence: 0.05
 
 vault:
   obsidian_compatible: true

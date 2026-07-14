@@ -163,9 +163,33 @@ lace config set retrieval.weights.recency 0.15
 
 ---
 
+## Model Context Protocol (MCP) Interface
+
+LACE exposes a rich set of tools and resources over the Model Context Protocol (MCP) using the stdio transport. This allows editors like Cursor or Claude Desktop to interact directly with your long-term memory.
+
+### Exposed Tools
+* **`initialize_lace_session(working_directory)`**: Establishes the current project scope dynamically by traversing parents of `working_directory` for a Git repository or `.lace/project.yaml`.
+* **`get_relevant_context(query)`**: Retrieves a compressed, prioritized markdown context block containing relevant decisions, preference files, patterns, and runbooks matching `query` from active scopes.
+* **`process_interaction(query, response, context_hint)`**: Enqueues conversation turns into the extraction worker queue to asynchronously evaluate, extract, and write new memory notes.
+* **`remember(content, category, tags, scope, confidence)`**: Explicitly adds a memory note to the vault and vector database.
+* **`search_memory(query, scope, max_results)`**: Semantically queries the vector database with five-signal score ranking.
+* **`list_memories(scope, category)`**: Lists all memories matching criteria.
+* **`forget_memory(memory_id)`**: Archives a memory note, disabling it from subsequent retrievals.
+* **`get_project_context(project_name)`**: Retrieves structured onboarding information for a project.
+* **`get_related_concepts(concept)`**: Traverses the NetworkX concept graph.
+
+### Exposed Resources
+* **`memory://instructions`**: The active memory protocol rules and requirements.
+* **`memory://project-context`**: Resolved project-specific preferences and setup files.
+* **`memory://patterns`**: Code style conventions and recurring development layouts.
+* **`memory://decisions`**: Architectural ADRs and choices.
+* **`memory://debug-log`**: Diagnostic history, runbooks, and crash reports.
+
+---
+
 ## Architecture & Internal Workflows
 
-For a detailed technical dive into the system modules, design schemas, and background workflows (deduplication, retrieval, sync, and graph traversal), refer to the [Architecture Document](file:///home/aayush-mittal/everything/projects/lace/architecture.md).
+For a detailed technical dive into the system modules, design schemas, and background workflows (deduplication, retrieval, sync, and graph traversal), refer to the [Architecture Document](ARCHITECTURE.md).
 
 ```mermaid
 graph TD
