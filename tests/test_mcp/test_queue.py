@@ -78,6 +78,85 @@ class TestInitQueueDb:
         init_queue_db()
 
 
+class TestGetConnectionDdl:
+    """Verifies _get_connection() no longer runs schema DDL (Finding 10 fix)."""
+
+    def test_connection_does_not_create_table(self, tmp_path, monkeypatch):
+        """_get_connection() alone must NOT create the queue table."""
+        fresh_db = tmp_path / "fresh" / "queue.db"
+        fresh_db.parent.mkdir(parents=True)
+
+        # Point get_queue_db_path to our fresh path so init_queue_db() is NOT called
+        monkeypatch.setattr(
+            "lace.mcp.queue.get_queue_db_path",
+            lambda: fresh_db,
+        )
+
+        from lace.mcp.queue import _get_connection
+        conn = _get_connection(fresh_db)
+        try:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='extraction_queue'"
+            )
+            assert cursor.fetchone() is None, (
+                "_get_connection() created the table — it should only be created by init_queue_db()"
+            )
+        finally:
+            conn.close()
+
+    def test_init_queue_db_creates_table(self, tmp_path, monkeypatch):
+        """After init_queue_db(), the table must exist."""
+        fresh_db = tmp_path / "fresh2" / "queue.db"
+        fresh_db.parent.mkdir(parents=True)
+
+        monkeypatch.setattr(
+            "lace.mcp.queue.get_queue_db_path",
+            lambda: fresh_db,
+        )
+
+        from lace.mcp.queue import _get_connection, init_queue_db
+        # Confirm table does NOT exist before init
+        conn = _get_connection(fresh_db)
+        try:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='extraction_queue'"
+            )
+            assert cursor.fetchone() is None, "Table should not exist before init_queue_db()"
+        finally:
+            conn.close()
+
+        # Call init and verify table exists
+        init_queue_db(fresh_db)
+        conn2 = _get_connection(fresh_db)
+        try:
+            cursor = conn2.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='extraction_queue'"
+            )
+            assert cursor.fetchone() is not None, "Table should exist after init_queue_db()"
+        finally:
+            conn2.close()
+
+    def test_get_connection_sets_row_factory(self, tmp_path, monkeypatch):
+        """_get_connection() must still set row_factory for dict-style access."""
+        fresh_db = tmp_path / "fresh3" / "queue.db"
+        fresh_db.parent.mkdir(parents=True)
+
+        monkeypatch.setattr(
+            "lace.mcp.queue.get_queue_db_path",
+            lambda: fresh_db,
+        )
+
+        from lace.mcp.queue import _get_connection, init_queue_db
+        init_queue_db(fresh_db)
+        conn = _get_connection(fresh_db)
+        try:
+            assert conn.row_factory is sqlite3.Row, (
+                "row_factory must be sqlite3.Row for dict-style access"
+            )
+        finally:
+            conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Enqueue tests
 # ---------------------------------------------------------------------------

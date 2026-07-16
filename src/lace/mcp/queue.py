@@ -142,22 +142,7 @@ def _get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     except Exception:
         pass
 
-    
-    # Always ensure tables and indexes exist. This guarantees LACE recovers
-    # gracefully if the database file is deleted/reset while the server is running.
-    try:
-        conn.execute(_CREATE_TABLE_SQL)
-        # Migrate old schema if canonical_hash column is missing
-        try:
-            conn.execute("ALTER TABLE extraction_queue ADD COLUMN canonical_hash TEXT")
-            conn.execute("ALTER TABLE extraction_queue ADD COLUMN repeat_count INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass # Columns already exist
-        conn.execute(_CREATE_INDEX_SQL)
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Failed to auto-initialize queue DB tables: {e}")
-        
+    # Schema managed by init_queue_db() at startup.
     conn.row_factory = sqlite3.Row  # Allow dict-style access: row['id']
     return conn
 
