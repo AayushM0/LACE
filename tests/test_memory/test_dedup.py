@@ -506,7 +506,7 @@ class TestDedupAndStore:
 
         existing = make_memory(memory_id="mem_existing")
         vector_index, memory_store = self._make_mocks()
-        memory_store.get_by_id.return_value = existing
+        memory_store.get.return_value = existing
 
         # Pre-populate hash index with the candidate's hash
         from lace.memory.normalize import canonical_hash
@@ -533,7 +533,7 @@ class TestDedupAndStore:
         # Embedding must NOT have been computed
         mock_embed.assert_not_called()
         # merge_into result stored
-        memory_store.update.assert_called_once()
+        memory_store.save.assert_called_once()
         assert result == "mem_existing"
 
         # Log row written with merge_hash action
@@ -566,8 +566,8 @@ class TestDedupAndStore:
             )
 
         # Store not called (skipped)
-        memory_store.create.assert_not_called()
-        memory_store.update.assert_not_called()
+        memory_store.add.assert_not_called()
+        memory_store.save.assert_not_called()
         assert result == "mem_similar"
 
         rows = read_log_rows(log_db, action="skip")
@@ -582,7 +582,7 @@ class TestDedupAndStore:
 
         existing = make_memory(memory_id="mem_close", confidence=0.7)
         vector_index, memory_store = self._make_mocks()
-        memory_store.get_by_id.return_value = existing
+        memory_store.get.return_value = existing
 
         # distance=0.20 → similarity = 1 - 0.10 = 0.90 → between merge and skip
         vector_index.query.return_value = [
@@ -602,8 +602,8 @@ class TestDedupAndStore:
                 log_db_path=log_db,
             )
 
-        memory_store.update.assert_called_once()
-        memory_store.create.assert_not_called()
+        memory_store.save.assert_called_once()
+        memory_store.add.assert_not_called()
         assert result == "mem_close"
 
         rows = read_log_rows(log_db, action="merge_embedding")
@@ -618,7 +618,7 @@ class TestDedupAndStore:
         existing = make_memory(memory_id="mem_distant")
         new_memory = make_memory(memory_id="mem_new_001")
         vector_index, memory_store = self._make_mocks()
-        memory_store.create.return_value = new_memory
+        memory_store.add.return_value = new_memory
 
         # distance=0.80 → similarity = 1 - 0.40 = 0.60 → below merge threshold
         vector_index.query.return_value = [
@@ -638,8 +638,7 @@ class TestDedupAndStore:
                 log_db_path=log_db,
             )
 
-        memory_store.create.assert_called_once()
-        vector_index.add.assert_called_once()
+        memory_store.add.assert_called_once()
         assert result == "mem_new_001"
 
         rows = read_log_rows(log_db, action="store")
@@ -653,7 +652,7 @@ class TestDedupAndStore:
 
         new_memory = make_memory(memory_id="mem_first")
         vector_index, memory_store = self._make_mocks()
-        memory_store.create.return_value = new_memory
+        memory_store.add.return_value = new_memory
 
         # Empty vault
         vector_index.query.return_value = []
@@ -672,7 +671,7 @@ class TestDedupAndStore:
             )
 
         assert result == "mem_first"
-        memory_store.create.assert_called_once()
+        memory_store.add.assert_called_once()
 
     def test_high_confidence_memory_protected_from_merge(self, tmp_path):
         """
@@ -691,7 +690,7 @@ class TestDedupAndStore:
         )
         new_memory = make_memory(memory_id="mem_new_low_conf")
         vector_index, memory_store = self._make_mocks()
-        memory_store.create.return_value = new_memory
+        memory_store.add.return_value = new_memory
 
         # Similarity is in merge range (0.90)
         vector_index.query.return_value = [
@@ -716,8 +715,8 @@ class TestDedupAndStore:
             )
 
         # Should store as new, not merge into validated memory
-        memory_store.update.assert_not_called()
-        memory_store.create.assert_called_once()
+        memory_store.save.assert_not_called()
+        memory_store.add.assert_called_once()
 
     def test_thresholds_read_from_config(self, tmp_path):
         """
@@ -732,7 +731,7 @@ class TestDedupAndStore:
         existing = make_memory(memory_id="mem_test")
         new_memory = make_memory(memory_id="mem_stored")
         vector_index, memory_store = self._make_mocks()
-        memory_store.create.return_value = new_memory
+        memory_store.add.return_value = new_memory
 
         # similarity = 0.90
         vector_index.query.return_value = [
@@ -754,7 +753,7 @@ class TestDedupAndStore:
             )
 
         # With skip_threshold=0.80 and similarity=0.90 → skip
-        memory_store.create.assert_not_called()
+        memory_store.add.assert_not_called()
         skip_rows = read_log_rows(log_db, action="skip")
         assert len(skip_rows) == 1
 
@@ -778,7 +777,7 @@ class TestTwoTierIntegration:
         new_memory = make_memory(memory_id="mem_stored_001")
         vector_index = MagicMock()
         memory_store = MagicMock()
-        memory_store.create.return_value = new_memory
+        memory_store.add.return_value = new_memory
         vector_index.query.return_value = []  # empty vault
 
         config = make_config()
@@ -826,8 +825,8 @@ class TestTwoTierIntegration:
         new_memory = make_memory(memory_id="mem_original")
         vector_index = MagicMock()
         memory_store = MagicMock()
-        memory_store.create.return_value = new_memory
-        memory_store.get_by_id.return_value = existing
+        memory_store.add.return_value = new_memory
+        memory_store.get.return_value = existing
         vector_index.query.return_value = []
 
         config = make_config()
@@ -849,7 +848,7 @@ class TestTwoTierIntegration:
         # Reset mocks for second call
         vector_index.reset_mock()
         memory_store.reset_mock()
-        memory_store.get_by_id.return_value = existing
+        memory_store.get.return_value = existing
 
         # Second identical candidate
         with patch("lace.memory.dedup.embed_text") as mock_embed:
@@ -867,7 +866,7 @@ class TestTwoTierIntegration:
         vector_index.query.assert_not_called()
 
         # Merge happened on the existing memory
-        memory_store.update.assert_called_once()
+        memory_store.save.assert_called_once()
 
         rows = read_log_rows(log_db, action="merge_hash")
         assert len(rows) == 1
