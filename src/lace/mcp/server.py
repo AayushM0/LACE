@@ -495,6 +495,13 @@ async def run_server(debug: bool = False) -> None:
     else:
         logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
+    # Pre-import heavy libraries in the main thread to prevent background import deadlocks
+    try:
+        import sentence_transformers
+        import chromadb
+    except ImportError:
+        pass
+
     # Initialize queue DB and start worker thread (daemon)
     try:
         from lace.mcp.queue import init_queue_db, start_worker_thread

@@ -121,21 +121,23 @@ def mock_stores():
     # Default: empty vault (no nearest neighbor)
     vector_index.query.return_value = []
 
-    # Default: create returns a new memory with predictable ID
-    def make_new_memory(candidate, config=None):
+    # Default: add() returns a new memory with predictable ID
+    def make_new_memory(content="", category="pattern", tags=None,
+                        scope="global", source="auto_extracted",
+                        confidence=0.8, summary=None, **_kw):
         mem = MagicMock()
-        mem.id = f"mem_{canonical_hash(candidate.get('summary', ''))[:8]}"
-        mem.summary = candidate.get("summary", "")
-        mem.tags = candidate.get("tags", [])
-        mem.confidence = candidate.get("confidence", 0.7)
+        mem.id = f"mem_{canonical_hash(summary or content)[:8]}"
+        mem.summary = summary or content
+        mem.tags = tags or []
+        mem.confidence = confidence
         mem.lifecycle = MemoryLifecycle.CAPTURED
-        mem.body = candidate.get("body", "")
+        mem.body = content
         mem.access_count = 0
         mem.last_accessed = datetime.now(timezone.utc).isoformat()
         return mem
 
-    memory_store.create.side_effect = make_new_memory
-    memory_store.get_by_id.return_value = None
+    memory_store.add.side_effect = make_new_memory
+    memory_store.get.return_value = None
     memory_store.update.return_value = None
 
     return vector_index, memory_store
@@ -308,7 +310,7 @@ class TestStressTestScenario:
         )
 
         # Zero vault writes
-        memory_store.create.assert_not_called()
+        memory_store.add.assert_not_called()
         memory_store.update.assert_not_called()
 
         # Zero stored IDs
@@ -530,9 +532,9 @@ class TestGenuineInteractionScenario:
                 memory_store=memory_store,
             )
 
-        # memory_store.create called once per unique interaction
-        assert memory_store.create.call_count == 5, (
-            f"Expected 5 vault writes, got {memory_store.create.call_count}"
+        # memory_store.add called once per unique interaction
+        assert memory_store.add.call_count == 5, (
+            f"Expected 5 vault writes, got {memory_store.add.call_count}"
         )
 
     def test_funnel_counts_after_genuine_interactions(
@@ -845,7 +847,7 @@ class TestThresholdBehavior:
         existing = self._make_existing_memory()
         vector_index = MagicMock()
         memory_store = MagicMock()
-        memory_store.get_by_id.return_value = existing
+        memory_store.get.return_value = existing
         # distance 0.04 → similarity 0.98
         vector_index.query.return_value = [
             self._make_vector_result(existing, distance=0.04)
@@ -870,7 +872,7 @@ class TestThresholdBehavior:
                 log_db_path=dbs["log"],
             )
 
-        memory_store.create.assert_not_called()
+        memory_store.add.assert_not_called()
         memory_store.update.assert_not_called()
 
         rows = [
@@ -891,7 +893,7 @@ class TestThresholdBehavior:
         existing = self._make_existing_memory()
         vector_index = MagicMock()
         memory_store = MagicMock()
-        memory_store.get_by_id.return_value = existing
+        memory_store.get.return_value = existing
         vector_index.query.return_value = [
             self._make_vector_result(existing, distance=0.20)
         ]
@@ -915,8 +917,8 @@ class TestThresholdBehavior:
                 log_db_path=dbs["log"],
             )
 
-        memory_store.update.assert_called_once()
-        memory_store.create.assert_not_called()
+        memory_store.save.assert_called_once()
+        memory_store.add.assert_not_called()
 
         rows = [
             r for r in read_all_rows(dbs["log"])
@@ -935,7 +937,7 @@ class TestThresholdBehavior:
         new_mem = self._make_existing_memory("mem_new")
         vector_index = MagicMock()
         memory_store = MagicMock()
-        memory_store.create.return_value = new_mem
+        memory_store.add.return_value = new_mem
         vector_index.query.return_value = [
             self._make_vector_result(existing, distance=0.80)
         ]
@@ -959,7 +961,7 @@ class TestThresholdBehavior:
                 log_db_path=dbs["log"],
             )
 
-        memory_store.create.assert_called_once()
+        memory_store.add.assert_called_once()
 
         rows = [
             r for r in read_all_rows(dbs["log"])
@@ -978,8 +980,8 @@ class TestThresholdBehavior:
         new_mem = self._make_existing_memory("mem_brand_new")
         vector_index = MagicMock()
         memory_store = MagicMock()
-        memory_store.get_by_id.return_value = existing
-        memory_store.create.return_value = new_mem
+        memory_store.get.return_value = existing
+        memory_store.add.return_value = new_mem
 
         # Three different similarity scenarios
         scenarios = [
@@ -1049,7 +1051,7 @@ class TestThresholdBehavior:
         existing.last_accessed = datetime.now(timezone.utc).isoformat()
         existing.summary = "Threshold test existing memory."
 
-        memory_store.get_by_id.return_value = existing
+        memory_store.get.return_value = existing
         # distance=0.36 → similarity = 1 - 0.18 = 0.82
         vector_index.query.return_value = [
             MagicMock(memory=existing, distance=0.36)
@@ -1088,8 +1090,8 @@ class TestThresholdBehavior:
             )
 
         # With lower threshold → merge, not store
-        memory_store.update.assert_called_once()
-        memory_store.create.assert_not_called()
+        memory_store.save.assert_called_once()
+        memory_store.add.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1131,7 +1133,7 @@ class TestPipelineResilience:
             )
 
         assert memories == []
-        memory_store.create.assert_not_called()
+        memory_store.add.assert_not_called()
 
     def test_embedding_failure_stores_as_new(
         self, dbs, default_config, mock_stores
@@ -1144,7 +1146,7 @@ class TestPipelineResilience:
         new_mem = MagicMock()
         new_mem.id = "mem_fallback"
         new_mem.summary = "Fallback memory."
-        memory_store.create.return_value = new_mem
+        memory_store.add.return_value = new_mem
 
         candidate = {
             "summary": "Memory stored despite embedding failure.",
@@ -1169,7 +1171,7 @@ class TestPipelineResilience:
             )
 
         # Must store as new rather than drop
-        memory_store.create.assert_called_once()
+        memory_store.add.assert_called_once()
         assert result is not None
 
     def test_pipeline_log_failure_does_not_crash_pipeline(
@@ -1182,7 +1184,7 @@ class TestPipelineResilience:
         new_mem = MagicMock()
         new_mem.id = "mem_log_resilience"
         new_mem.summary = "Log resilience test."
-        memory_store.create.return_value = new_mem
+        memory_store.add.return_value = new_mem
 
         candidate = {
             "summary": "Pipeline continues even when logging fails completely.",
@@ -1208,7 +1210,7 @@ class TestPipelineResilience:
             )
 
         # Memory still stored despite log failure
-        memory_store.create.assert_called_once()
+        memory_store.add.assert_called_once()
 
     def test_malformed_llm_json_does_not_crash_pipeline(
         self, dbs, default_config, mock_stores
@@ -1237,7 +1239,7 @@ class TestPipelineResilience:
             )
 
         assert memories == []
-        memory_store.create.assert_not_called()
+        memory_store.add.assert_not_called()
 
     def test_cooldown_zero_allows_all_through(
         self, dbs, mock_stores
@@ -1449,7 +1451,7 @@ class TestSystemHealthReport:
         # We query and return the first stored memory with distance = 0.20 (similarity = 0.90)
         # We mock get_by_id to return our existing memory object
         existing_mem = stored_memories[0]
-        memory_store.get_by_id.return_value = existing_mem
+        memory_store.get.return_value = existing_mem
         
         mock_result = MagicMock()
         mock_result.memory = existing_mem
@@ -1493,7 +1495,7 @@ class TestSystemHealthReport:
         mark_processed(item["id"], db_path=dbs["queue"])
         
         # We query and return the first stored memory with distance = 0.04 (similarity = 0.98)
-        memory_store.get_by_id.return_value = existing_mem
+        memory_store.get.return_value = existing_mem
         mock_result_skip = MagicMock()
         mock_result_skip.memory = existing_mem
         mock_result_skip.distance = 0.04

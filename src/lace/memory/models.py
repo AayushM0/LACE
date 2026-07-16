@@ -35,63 +35,6 @@ class MemoryLifecycle(str, Enum):
     ARCHIVED     = "archived"
 
 
-@dataclass(frozen=True)
-class Confidence:
-    """Value object representing memory search/retrieval confidence threshold."""
-    value: float
-
-    def __post_init__(self) -> None:
-        try:
-            val = float(self.value)
-        except (ValueError, TypeError):
-            raise ValueError(f"Confidence value must be a numeric float, got {self.value}")
-        if not 0.0 <= val <= 1.0:
-            raise ValueError(f"Confidence value must be between 0.0 and 1.0, got {self.value}")
-        object.__setattr__(self, "value", val)
-
-    def __float__(self) -> float:
-        return self.value
-
-    def __eq__(self, other: Any) -> bool:
-        if isinstance(other, Confidence):
-            return self.value == other.value
-        try:
-            return self.value == float(other)
-        except (ValueError, TypeError):
-            return False
-
-    def __ge__(self, other: Any) -> bool:
-        if isinstance(other, Confidence):
-            return self.value >= other.value
-        try:
-            return self.value >= float(other)
-        except (ValueError, TypeError):
-            return False
-
-    def __gt__(self, other: Any) -> bool:
-        if isinstance(other, Confidence):
-            return self.value > other.value
-        try:
-            return self.value > float(other)
-        except (ValueError, TypeError):
-            return False
-
-    def __le__(self, other: Any) -> bool:
-        if isinstance(other, Confidence):
-            return self.value <= other.value
-        try:
-            return self.value <= float(other)
-        except (ValueError, TypeError):
-            return False
-
-    def __lt__(self, other: Any) -> bool:
-        if isinstance(other, Confidence):
-            return self.value < other.value
-        try:
-            return self.value < float(other)
-        except (ValueError, TypeError):
-            return False
-
 
 # ── MemoryObject ──────────────────────────────────────────────────────────────
 

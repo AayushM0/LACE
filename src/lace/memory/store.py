@@ -12,7 +12,6 @@ from lace.memory.markdown import (
     save_memory_to_file,
 )
 from lace.memory.models import (
-    Confidence,
     MemoryCategory,
     MemoryLifecycle,
     MemoryObject,
@@ -214,27 +213,8 @@ class MemoryStore:
         source: str | MemorySource = MemorySource.MANUAL,
         confidence: float = 0.8,
         summary: str | None = None,
-        draft: bool = False,
     ) -> MemoryObject:
         """Create and persist a new memory with embedding."""
-        if draft:
-            from lace.memory.inbox import save_to_inbox
-            
-            memory = make_memory(
-                content=content,
-                category=category,
-                tags=tags or [],
-                scope=scope,
-                source=source,
-                confidence=confidence,
-            )
-            if summary:
-                memory.summary = summary
-                
-            draft_id = save_to_inbox(memory)
-            memory.id = draft_id
-            return memory
-
         memory = make_memory(
             content=content,
             category=category,
@@ -416,7 +396,7 @@ class MemoryStore:
         scope: str | None = None,
         max_results: int | None = None,
         threshold: float | None = None,
-        min_confidence: Confidence | float | None = None,
+        min_confidence: float | None = None,
     ) -> list[RetrievalResult]:
         """Semantic search using vector similarity + multi-signal ranking."""
         import time
@@ -474,7 +454,7 @@ class MemoryStore:
         scope: str,
         max_results: int,
         threshold: float,
-        min_confidence: Confidence | float | None = None,
+        min_confidence: float | None = None,
     ) -> list[RetrievalResult]:
         """
         Original vector search + keyword fallback logic.
@@ -694,7 +674,7 @@ class MemoryStore:
 
     def get_review_candidates(
         self,
-        min_confidence: Confidence | float = 0.7,
+        min_confidence: float = 0.7,
         include_zero_access: bool = True,
         limit: int = 50,
     ) -> list[MemoryObject]:

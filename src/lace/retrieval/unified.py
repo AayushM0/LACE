@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable
 
-from lace.memory.models import MemoryObject, RetrievalResult, Confidence
+from lace.memory.models import MemoryObject, RetrievalResult
 
 if TYPE_CHECKING:
     from lace.retrieval.tag_index import TagIndex
@@ -202,7 +202,7 @@ class UnifiedRetriever:
         max_results: int = 10,
         threshold: float = 0.35,
         active_scope: str = "global",
-        min_confidence: Confidence | float | None = None,
+        min_confidence: float | None = None,
     ) -> list[RetrievalResult]:
         """
         Run the full multi-signal retrieval pipeline.

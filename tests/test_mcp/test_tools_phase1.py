@@ -318,44 +318,6 @@ class TestUpdateSessionHistory:
             server_module._mcp_session_history = original_history
 
 
-# ---------------------------------------------------------------------------
-# store.py draft flag tests
-# ---------------------------------------------------------------------------
-
-class TestStoreDraftFlag:
-    def test_draft_true_routes_to_inbox(self):
-        """store.add(draft=True) routes to inbox, not vault."""
-        from lace.core.config import get_lace_home, load_config
-        
-        with patch("lace.memory.inbox.save_to_inbox", return_value="draft_abc123") as mock_inbox:
-            # We need to patch at the point where store.py imports it
-            with patch("lace.memory.store.MemoryStore.add") as mock_add:
-                # Simulate the draft branch behavior
-                mock_add.return_value = ("draft_abc123", "drafted")
-                
-                # This is a behavioral contract test:
-                # When draft=True is passed, the return status is "drafted"
-                # and the ID starts with "draft_"
-                memory_id, status = mock_add(
-                    content="test",
-                    draft=True,
-                )
-                
-                assert status == "drafted"
-    
-    def test_draft_false_uses_normal_path(self):
-        """store.add(draft=False) uses the normal vault path."""
-        with patch("lace.memory.store.MemoryStore.add") as mock_add:
-            mock_add.return_value = ("mem_xyz789", "stored")
-            
-            memory_id, status = mock_add(
-                content="test",
-                draft=False,
-            )
-            
-            # Normal path returns mem_ prefix and stored status
-            assert status == "stored"
-
 
 # ---------------------------------------------------------------------------
 # initialize_lace_session and resource instructions tests

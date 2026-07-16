@@ -128,3 +128,40 @@ def test_stats_returns_correct_counts(store):
     assert stats["archived"] == 1
     assert stats["by_category"]["pattern"] == 3
     assert stats["by_category"]["decision"] == 1
+
+
+# ── Inbox removal (Finding 6) ────────────────────────────────────────────────
+# Proves: inbox module deleted, store.add() stores directly to vault, no draft param.
+
+import inspect
+
+
+def test_inbox_module_not_importable():
+    """inbox.py was removed — importing it must fail."""
+    with pytest.raises(ModuleNotFoundError):
+        import importlib
+        importlib.import_module("lace.memory.inbox")
+
+
+def test_store_add_has_no_draft_parameter():
+    """store.add() signature has no 'draft' parameter."""
+    sig = inspect.signature(MemoryStore.add)
+    assert "draft" not in sig.parameters
+
+
+def test_store_add_stores_directly_to_vault(store):
+    """add() writes to vault immediately — no intermediate inbox/draft state."""
+    memory = store.add("Direct to vault", tags=["test"])
+    # Immediately retrievable from vault
+    retrieved = store.get(memory.id)
+    assert retrieved is not None
+    assert retrieved.content == "Direct to vault"
+    # File exists on disk
+    assert Path(retrieved.file_path).exists()
+
+
+def test_store_add_no_inbox_import_in_store_module():
+    """store.py does not import anything from the inbox module."""
+    import lace.memory.store as store_mod
+    source = inspect.getsource(store_mod)
+    assert "inbox" not in source.lower()
