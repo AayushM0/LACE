@@ -492,58 +492,6 @@ def memory_forget(
     console.print(f"[green]✓[/green] Memory [bold]{memory_id}[/bold] archived.")
 
 
-@memory_app.command("search")
-def memory_search(
-    query: Annotated[str, typer.Argument(help="Search query.")],
-    limit: Annotated[int, typer.Option("--limit", "-n")] = 10,
-    scope: Annotated[
-        Optional[str],
-        typer.Option("--scope", "-s", help="Scope to search (defaults to active scope)."),
-    ] = None,
-    show_scores: Annotated[bool, typer.Option("--scores")] = False,
-) -> None:
-    """Semantic search across memories."""
-    if scope is None:
-        scope = get_active_scope()
-    store = _get_store(scope=scope)
-
-    with console.status(f"[bold green]Searching in {scope}:[/bold green] {query}"):
-        results = store.search(query, scope=scope, max_results=limit)
-
-    if not results:
-        console.print(f"[yellow]No memories found for:[/yellow] {query}")
-        return
-
-    table = Table(
-        title=f"Search in {scope}: '{query}' ({len(results)} results)",
-        show_header=True,
-        header_style="bold cyan",
-        expand=True,
-    )
-    table.add_column("Rank", width=4)
-    table.add_column("ID", style="dim", width=16)
-    table.add_column("Category", width=10)
-    table.add_column("Tags", width=20)
-    if show_scores:
-        table.add_column("Score", width=6)
-    table.add_column("Summary")
-
-    for result in results:
-        m = result.memory
-        row = [
-            str(result.rank),
-            m.id,
-            m.category.value,
-            ", ".join(m.tags[:3]) if m.tags else "[dim]—[/dim]",
-        ]
-        if show_scores:
-            row.append(f"{result.relevance_score:.3f}")
-        row.append(m.display_summary())
-        table.add_row(*row)
-
-    console.print(table)
-    console.print(f"[dim]Match type: {results[0].match_type if results else '—'}[/dim]")
-
 
 @memory_app.command("reindex")
 def memory_reindex() -> None:

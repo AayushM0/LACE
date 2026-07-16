@@ -508,10 +508,7 @@ def dedup_and_store(
 
     if existing_id:
         # Load existing memory
-        if hasattr(memory_store, "get_by_id"):
-            existing = memory_store.get_by_id(existing_id)
-        else:
-            existing = memory_store.get(existing_id)
+        existing = memory_store.get(existing_id)
 
         if existing is None:
             logger.warning(
@@ -520,10 +517,7 @@ def dedup_and_store(
             )
         else:
             updated = merge_into(existing, candidate, reason="hash_match")
-            if hasattr(memory_store, "update"):
-                memory_store.update(updated)
-            else:
-                memory_store.save(updated)
+            memory_store.save(updated)
                 
             update_hash_index_merge_time(candidate_hash, db_path=hash_index_db_path)
 
@@ -625,10 +619,7 @@ def dedup_and_store(
                 score=similarity
             )
 
-        if hasattr(memory_store, "get_by_id"):
-            existing = memory_store.get_by_id(nearest.memory.id)
-        else:
-            existing = memory_store.get(nearest.memory.id)
+        existing = memory_store.get(nearest.memory.id)
 
         if existing is None:
             logger.warning(
@@ -643,10 +634,7 @@ def dedup_and_store(
             )
 
         updated = merge_into(existing, candidate, reason="embedding_similarity")
-        if hasattr(memory_store, "update"):
-            memory_store.update(updated)
-        else:
-            memory_store.save(updated)
+        memory_store.save(updated)
 
         log_dedup_event(
             canonical_hash_value=candidate_hash,
@@ -692,33 +680,18 @@ def _store_new(
     Store a candidate as a brand new memory.
     """
     try:
-        if hasattr(memory_store, "create"):
-            new_memory = memory_store.create(candidate, config=config)
-            try:
-                embedding = embed_text(candidate.get("summary", ""))
-                vector_index.add(new_memory, embedding)
-            except Exception as e:
-                logger.error(
-                    f"[Dedup] Embedding/vector indexing failed during store, "
-                    f"proceeding with memory creation: {e}",
-                    exc_info=True,
-                )
-                new_memory.needs_reindex = True
-                if hasattr(memory_store, "save"):
-                    memory_store.save(new_memory)
-        else:
-            new_memory = memory_store.add(
-                content=candidate.get("body") or candidate.get("content") or candidate.get("summary", ""),
-                category=candidate.get("category", "pattern"),
-                tags=candidate.get("tags", []),
-                scope=candidate.get("project_scope", "global"),
-                source="auto_extracted",
-                confidence=candidate.get("confidence", 0.4),
-                summary=candidate.get("summary"),
-            )
-            if candidate.get("needs_reindex") and not new_memory.needs_reindex:
-                new_memory.needs_reindex = True
-                memory_store.save(new_memory)
+        new_memory = memory_store.add(
+            content=candidate.get("body") or candidate.get("content") or candidate.get("summary", ""),
+            category=candidate.get("category", "pattern"),
+            tags=candidate.get("tags", []),
+            scope=candidate.get("project_scope", "global"),
+            source="auto_extracted",
+            confidence=candidate.get("confidence", 0.4),
+            summary=candidate.get("summary"),
+        )
+        if candidate.get("needs_reindex") and not new_memory.needs_reindex:
+            new_memory.needs_reindex = True
+            memory_store.save(new_memory)
 
         # Update hash index
         insert_hash_index_entry(
