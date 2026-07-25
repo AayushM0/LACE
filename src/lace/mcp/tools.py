@@ -266,7 +266,8 @@ async def search_memory(
     seen_ids = set()
     
     for search_scope in scopes_to_search:
-        scope_results = _multi_scope_search(
+        scope_results = await asyncio.to_thread(
+            _multi_scope_search,
             store=store,
             query=query,
             primary_scope=search_scope,
@@ -639,10 +640,11 @@ async def get_relevant_context(
     
     # Semantic search using existing infrastructure.
     try:
-        results = store.search(
+        results = await asyncio.to_thread(
+            store.search,
             query=search_query,
             scope=resolved_scope,
-            max_results=10,
+            max_results=5,
         )
     except Exception as e:
         logger.error(f"get_relevant_context: search failed: {e}")
@@ -652,7 +654,7 @@ async def get_relevant_context(
         return ""
     
     # Apply relevance threshold.
-    RELEVANCE_THRESHOLD = 0.45
+    RELEVANCE_THRESHOLD = 0.65
     filtered = [r for r in results if r.relevance_score >= RELEVANCE_THRESHOLD]
     
     if not filtered:
@@ -663,7 +665,7 @@ async def get_relevant_context(
         return ""
     
     # Build the markdown output with a token budget.
-    TOKEN_BUDGET = 2000
+    TOKEN_BUDGET = 1200
     MAX_INDIVIDUAL_MEMORY_TOKENS = 800
     
     output_lines: list[str] = ["## Context from LACE Memory Vault\n"]

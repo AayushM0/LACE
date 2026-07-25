@@ -140,7 +140,17 @@ async def test_get_relevant_context(store, lace_env, monkeypatch):
     """get_relevant_context returns relevant memories as markdown."""
     monkeypatch.setenv("LACE_HOME", str(lace_env))
 
-    store.add("Always use connection pooling with asyncpg", category="pattern", confidence=0.9)
+    mem = store.add("Always use connection pooling with asyncpg", category="pattern", confidence=0.9)
+
+    from lace.retrieval.unified import RetrievalResult
+    from unittest.mock import MagicMock
+    mock_search = MagicMock(return_value=[
+        RetrievalResult(memory=mem, relevance_score=0.85, match_type="keyword", rank=1)
+    ])
+    monkeypatch.setattr(store, "search", mock_search)
+
+    import lace.mcp.tools
+    monkeypatch.setattr(lace.mcp.tools, "_get_store", lambda scope=None: (store, "global"))
 
     from lace.mcp.tools import get_relevant_context
     result = await get_relevant_context("asyncpg connection pooling", scope="global")

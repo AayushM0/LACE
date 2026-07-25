@@ -63,10 +63,10 @@ class TestGetRelevantContext:
     
     @pytest.mark.asyncio
     async def test_includes_results_above_threshold(self):
-        """Results at or above 0.45 are included."""
+        """Results at or above 0.65 are included."""
         mock_store = MagicMock()
         mock_store.search.return_value = [
-            self._make_search_result(0.45, "Threshold content", "mem_threshold"),
+            self._make_search_result(0.65, "Threshold content", "mem_threshold"),
             self._make_search_result(0.80, "High relevance content", "mem_high"),
         ]
         
