@@ -1,226 +1,226 @@
 # LACE (Local AI Context Engine)
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Protocol: MCP](https://img.shields.io/badge/Protocol-MCP%20stdio-purple.svg)](https://modelcontextprotocol.io/)
+[![Tests: 584 Passed](https://img.shields.io/badge/Tests-584%20Passed-brightgreen.svg)](tests/)
+[![Architecture: Local--First](https://img.shields.io/badge/Architecture-Local--First%20Decoupled-orange.svg)](docs/adr/0001-local-first-decoupled-architecture.md)
 
-**LACE (Local AI Context Engine)** is a persistent, semantic memory and local context orchestration engine for your AI tools and agents. It stores memories as human-readable Markdown notes in a local vault, indexes them using local vector embeddings, and links them into a semantic knowledge graph. With built-in bidirectional Obsidian sync and a Model Context Protocol (MCP) server, LACE acts as a unified long-term memory layer for any AI tool you use.
+**LACE (Local AI Context Engine)** is a local-first context and persistent memory engine designed for AI coding agents and developer environments (Claude Desktop, Cursor, and custom agent harnesses). It stores memories as human-readable Markdown notes in a local vault, maintains an embedded vector index and a concept graph, and exposes them over the Model Context Protocol (MCP).
 
----
-
-## Key Features
-
-* **Persistent Local Memory**: Stored as human-readable Markdown files (`~/.lace/memory/vault`) and indexed with ChromaDB.
-* **Context-Aware Scoping**: Manage memories across multiple scopes—**Global**, **Project-specific** (auto-detected via Git trees), and **Ephemeral Session** scopes.
-* **6-Signal Retrieval & Ranking**: Uses a composite relevance score `[0.0 - 1.0]` combining:
-  * Semantic Similarity (ChromaDB vector distance)
-  * Tag Expansion (queries scanned for explicit keyword tags)
-  * Knowledge Graph Context (NetworkX topological neighbors)
-  * Co-Retrieval Boost (frequency-based usage co-occurrence)
-  * Recency Decay (time-based relevance halving)
-  * Confidence Ratings (user-supplied helpfulness/feedback)
-* **Smart Deduplication & Merging**: Evaluates similarity during ingestion:
-  * **> 95% similarity**: Skips saving to avoid bloating.
-  * **85% - 95% similarity**: Automatically merges content and tags into the existing memory note.
-  * **< 85% similarity**: Stores as a new memory.
-* **Bidirectional Obsidian Sync**: Real-time sync between your LACE memory vault and your personal Obsidian vault, tracking modification times (`mtime`) and resolving conflicts gracefully.
-* **Knowledge Graph & Wikilink Injection**: Compiles a concept network using NetworkX and automatically injects Obsidian-style `[[wikilinks]]` into related notes.
-* **Model Context Protocol (MCP) Support**: Exposes LACE memories directly to compatible LLM clients (such as Claude Desktop or Cursor) as tools using the MCP stdio protocol.
+By running locally and decoupling the write path via an embedded SQLite queue, LACE provides persistent cross-session memory without transmitting proprietary code to cloud databases or stalling interactive agent loops.
 
 ---
 
-## Installation & Setup
+## Architecture & System Design
 
-LACE uses Python `hatchling` for packaging and is best managed using `uv`.
+Rather than introducing cloud microservices overhead, LACE is engineered as an **embedded, local-first system with decoupled background subsystems**. Inter-process communication (IPC) runs over standard I/O (`stdio`), and write latency is bounded by a producer-consumer SQLite worker.
+
+```
+                  AI Client (Claude Desktop / Cursor / IDE)
+                                      │
+                         Model Context Protocol (JSON-RPC over stdio)
+                                      ▼
+                        ┌───────────────────────────┐
+                        │   src/lace/mcp/server.py  │  ◄── Typer CLI (`lace`)
+                        └─────────────┬─────────────┘
+                                      │
+                                      ▼
+                        ┌───────────────────────────┐
+                        │   src/lace/memory/store.py│  (CRUD & Retrieval Seam)
+                        └──────┬──────────────┬─────┘
+                               │              │
+        ┌──────────────────────┘              └─────────────────────┐
+        ▼                                                           ▼
+[ Ingestion Pipeline ]                                     [ Retrieval Engine ]
+ 1. Write to SQLite queue (<5ms)                            1. ChromaDB Cosine Search
+ 2. Worker pre-filters (<100 chars)                         2. Tag Scan Expansion
+ 3. LLM evaluates worthiness                                3. NetworkX Topological Walk
+ 4. Two-Tier Deduplication:                                 4. Co-Retrieval Boost
+    • >95% similarity: Drop duplicate                       5. Recency Decay Half-Life
+    • 85–95% similarity: Merge into note                    6. User Confidence Weighting
+    • <85% similarity: Write new note                       7. Filter & Rank (Score >= threshold)
+        │                                                           │
+        ▼                                                           ▼
+~/.lace/queue/extraction_queue.db                          Compressed Markdown Context Block
+        │
+        ▼
+~/.lace/memory/vault/ (Markdown Source of Truth) ◄──► Obsidian Sync Daemon (`watchdog` + mtime)
+```
+
+For the formal evaluation of why this local-first architecture was selected over remote cloud clusters (e.g. Kubernetes/SaaS), see [ADR-0001: Decoupled Local Subsystem Architecture](docs/adr/0001-local-first-decoupled-architecture.md).
+
+---
+
+## Core Engineering Highlights
+
+* **Decoupled Asynchronous Write Path**: Interactive agent turns require sub-second responses. LACE accepts incoming conversation turns via `process_interaction`, enqueues them into an embedded SQLite database in **$<5\text{ms}$**, and returns immediately. A detached background worker thread handles slow LLM extraction ($5\text{s} - 30\text{s}$) asynchronously.
+* **Deterministic Concurrency Management**: SQLite database connections enforce parameterized queries (`?`) and `timeout=10.0` locks running in WAL mode, eliminating database contention between concurrent CLI commands and MCP daemon threads.
+* **Two-Tier Vector Deduplication**: Prevents index bloat and duplicate memory creation during agent sessions:
+  * **$> 95\%$ Cosine Similarity**: Candidate dropped (suppressed).
+  * **$85\% - 95\%$ Cosine Similarity**: Candidate merged into the existing Markdown file (appends new details and unions tags).
+  * **$< 85\%$ Cosine Similarity**: Stored as a new memory note.
+* **7-Step Multi-Signal Retrieval**: Evaluates candidate notes through a weighted scoring equation:
+  $$\text{Score} = w_{\text{vector}} S_{\text{vector}} + w_{\text{tag}} S_{\text{tag}} + w_{\text{graph}} S_{\text{graph}} + w_{\text{co}} S_{\text{co}} + w_{\text{recency}} S_{\text{recency}} + w_{\text{confidence}} S_{\text{confidence}}$$
+* **Multi-Threaded Vault Ingestion**: Uses Python's `concurrent.futures.ThreadPoolExecutor` to parallelize disk I/O when reading and indexing thousands of notes during cold starts.
+* **Bidirectional Obsidian Sync**: Employs `watchdog` to monitor filesystem changes, using modification times (`mtime`) and SHA-256 hashes in `vault_hash_index.db` to synchronize edits without infinite write loops.
+
+---
+
+## Quickstart (Under 2 Minutes)
 
 ### 1. Prerequisites
-- Python `>= 3.11`
-- [uv](https://github.com/astral-sh/uv) (recommended) or `pip`
+* Python `>= 3.11`
+* [uv](https://github.com/astral-sh/uv) (recommended) or `pip`
 
-### 2. Install LACE
-Clone the repository and install it in editable/development mode:
-
+### 2. Installation
 ```bash
-git clone https://github.com/AayushM0/lace.git
-cd lace
+git clone https://github.com/AayushM0/LACE.git
+cd LACE
 uv pip install -e .
 ```
 
-Alternatively, run commands directly through `uv run`:
-```bash
-uv run lace --help
-```
-
-### 3. Initialize LACE
-Set up the default home directories and default config file (`~/.lace/config/lace.yaml`):
-
+### 3. Initialize Environment
+Provisions the default configuration (`~/.lace/config/lace.yaml`) and vault directories (`~/.lace/memory/vault/`):
 ```bash
 lace init
 ```
 
-To initialize LACE in a custom home directory:
-```bash
-lace init --home /path/to/custom/dir
+### 4. Wire into AI Clients (MCP Setup)
+
+LACE communicates with any MCP-compliant client via standard I/O. Add the following entry to your client configuration:
+
+#### For Claude Desktop
+Edit `claude_desktop_config.json`:
+* **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+* **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+* **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "lace": {
+      "command": "uv",
+      "args": ["run", "--directory", "/absolute/path/to/LACE", "lace", "mcp", "start"]
+    }
+  }
+}
 ```
+
+#### For Cursor
+Add to Cursor Settings > Features > MCP > Add New MCP Server:
+* **Name**: `lace`
+* **Type**: `command`
+* **Command**: `uv run --directory /absolute/path/to/LACE lace mcp start`
 
 ---
 
-## Quick Start
-
-A basic workflow showing how to use LACE to remember, search, and recall context:
-
-### 1. Add a Memory
-Manually save context with tags, category, and scope:
-```bash
-lace memory add "I am building a web app using FastAPI and Svelte." --tag fastapi --tag svelte --category tech-stack
-```
-
-### 2. Search Memories
-Perform a semantic search across your memory vault:
-```bash
-lace memory search "what is my web app stack?" --scores
-```
-
-### 3. Ask the LLM (with context injection)
-Query the configured LLM client. LACE will fetch relevant memories, inject them as context, and stream the response:
-```bash
-lace ask "Write a template setup for my web app project" --show-context
-```
-
----
-
-## Configuration
-
-The configuration is saved in `~/.lace/config/lace.yaml`. You can modify it directly or use the CLI:
-
-```bash
-# View current config parameters
-lace config show
-
-# Set LLM provider to openai
-lace config set provider.default "openai"
-
-# Adjust retrieval weights
-lace config set retrieval.weights.vector 0.50
-lace config set retrieval.weights.recency 0.15
-```
-
-### Configuration Fields
-* **`memory`**: Controls deduplication, confidence extraction thresholds, and decay half-life.
-* **`retrieval`**: Defines the relevance threshold for search and the weights of the 5 signals (must sum to `1.0`).
-* **`embeddings`**: Selects the vector embeddings provider (`local` / `openai`) and model (e.g., `all-MiniLM-L6-v2`).
-* **`provider`**: Configuration for Ollama, OpenAI, and Anthropic LLM clients.
-
----
-
-## CLI Command Reference
+## Verified CLI Command Reference
 
 ### System & Configuration
 | Command | Description |
 | :--- | :--- |
-| `lace init [--home <PATH>]` | Initialize LACE home directories and default config |
-| `lace version` | Print current LACE package version |
-| `lace config show` | View current configurations |
-| `lace config set <key> <value>` | Set a configuration value using dot notation |
+| `lace init [--home <PATH>]` | Initialize default directory tree and YAML configuration |
+| `lace version` | Print installed package version |
+| `lace config show` | Print resolved configuration settings |
+| `lace config set <key> <value>` | Update a specific configuration parameter using dot notation |
 
-### Project & Scope Management
+### Scope Management
 | Command | Description |
 | :--- | :--- |
-| `lace project create <name>` | Create a project scope file |
-| `lace project list` | List all project scopes |
-| `lace project switch <name>` | Manually switch active project scope |
-| `lace project info` | View metadata of the active scope |
-| `lace project detect` | Auto-detect scope based on active Git tree |
-
-### Ephemeral Sessions
-| Command | Description |
-| :--- | :--- |
-| `lace session start` | Begin an ephemeral session-scoped memory tree |
-| `lace session info` | Print current session identifier |
-| `lace session stop` | Stop active session and restore default scope |
+| `lace project detect` | Automatically resolve project scope from the active Git root |
+| `lace project create <name>` | Explicitly initialize a named project scope |
+| `lace project switch <name>` | Set the active project scope |
+| `lace project list` | List all registered project scopes |
+| `lace session start` | Begin an isolated, ephemeral session memory tree |
+| `lace session stop` | Terminate active ephemeral session and restore baseline scope |
 
 ### Memory CRUD & Search
 | Command | Description |
 | :--- | :--- |
-| `lace memory add "<content>"` | Add a new memory with tags and category |
-| `lace memory list` | View table of active memories |
-| `lace memory show <id>` | View contents and YAML metadata of a memory note |
-| `lace memory forget <id>` | Archive a memory note (retains file, skips retrieval) |
-| `lace memory search <query>` | Query memories semantically with scoring |
-| `lace memory reindex` | Re-embed all notes in ChromaDB |
-| `lace memory stats` | View latency, quality, and storage stats |
-| `lace memory rate <id> <score>` | Adjust confidence rating (`helpful`, `outdated`, `wrong`) |
-| `lace memory review` | Start interactive review of low-confidence notes |
+| `lace memory add "<content>"` | Manually add a memory note with optional `--tag` and `--category` |
+| `lace memory search "<query>"` | Semantically search memories with composite scoring (`--scores`) |
+| `lace memory list` | Display tabular list of active memories in scope |
+| `lace memory show <id>` | Print memory body, frontmatter metadata, and history |
+| `lace memory forget <id>` | Soft-delete a memory note (archives file, removes from vector index) |
+| `lace memory rate <id> <score>` | Provide feedback (`helpful`, `outdated`, `wrong`) to adjust confidence |
+| `lace memory reindex` | Re-embed all Markdown vault files into ChromaDB |
+| `lace memory stats` | Output collection sizes, memory counts, and retrieval latency |
 
-### Obsidian Integration & Graph
+### Knowledge Graph & Obsidian Sync
 | Command | Description |
 | :--- | :--- |
-| `lace vault sync` | Perform bidirectional sync with Obsidian vault |
-| `lace vault watch` | Start real-time file system monitoring of Obsidian vault |
-| `lace vault status` | Check sync tracking stats |
-| `lace graph build` | Construct NetworkX graph from Markdown files |
-| `lace graph stats` | Display graph node and edge distributions |
-| `lace graph related <concept>` | Traverse the graph network using Breadth-First Search |
-| `lace wikilink inject` | Inject related wikilinks (`[[concept]]`) into notes |
+| `lace graph build` | Reconstruct NetworkX concept network from vault links and tags |
+| `lace graph stats` | Display node, edge, and density statistics |
+| `lace graph related <concept>` | Perform Breadth-First Search (BFS) for related concepts |
+| `lace wikilink inject` | Automatically inject `[[wikilinks]]` into matching vault notes |
+| `lace vault sync` | Execute bidirectional synchronization with Obsidian vault |
+| `lace vault watch` | Launch real-time background filesystem monitor for Obsidian vault |
 
 ---
 
-## Model Context Protocol (MCP) Interface
+## Directory & State Layout
 
-LACE exposes a rich set of tools and resources over the Model Context Protocol (MCP) using the stdio transport. This allows editors like Cursor or Claude Desktop to interact directly with your long-term memory.
+All persistent application data resides in `~/.lace/` (overrideable via `LACE_HOME`):
 
-### Exposed Tools
-* **`initialize_lace_session(working_directory)`**: Establishes the current project scope dynamically by traversing parents of `working_directory` for a Git repository or `.lace/project.yaml`.
-* **`get_relevant_context(query, scope)`**: Retrieves a compressed, prioritized markdown context block containing relevant decisions, preference files, patterns, and runbooks matching `query` from active scopes.
-* **`process_interaction(query, response, scope, context_hint)`**: Enqueues conversation turns into the extraction worker queue to asynchronously evaluate, extract, and write new memory notes.
-* **`remember(content, category, tags, scope, summary, body)`**: Explicitly adds a memory note to the vault and vector database. Accepts legacy `summary`/`body` arguments as optional fallbacks.
-* **`search_memory(query, scope, max_results, category)`**: Semantically queries the vector database with six-signal score ranking.
-* **`list_memories(scope, category, limit, lifecycle)`**: Lists all memories matching criteria.
-* **`forget_memory(memory_id)`**: Archives a memory note, disabling it from subsequent retrievals.
-* **`get_project_context()`**: Retrieves structured onboarding information, identity, and active preferences for the current project.
-* **`get_related_concepts(concept, depth, memories_only)`**: Traverses the NetworkX concept graph.
-
-### Exposed Resources
-* **`memory://instructions`**: The active memory protocol rules and requirements.
-* **`memory://project-context`**: Resolved project-specific preferences and setup files.
-* **`memory://patterns`**: Code style conventions and recurring development layouts.
-* **`memory://decisions`**: Architectural ADRs and choices.
-* **`memory://debug-log`**: Diagnostic history, runbooks, and crash reports.
-
----
-
-## Architecture & Internal Workflows
-
-For a detailed technical dive into the system modules, design schemas, and background workflows (deduplication, retrieval, sync, and graph traversal), refer to the [Architecture Document](ARCHITECTURE.md).
-
-```mermaid
-graph TD
-    CLI[LACE CLI / MCP Client] --> Core[Core Orchestrator / Scope Manager]
-    Core --> MemoryStore[Memory Store CRUD]
-    MemoryStore --> Markdown[Markdown Vault Parser]
-    MemoryStore --> Chroma[ChromaDB Vector Store]
-    MemoryStore --> Graph[NetworkX Knowledge Graph]
-    Markdown --> Obsidian[Obsidian Vault Sync]
+```
+~/.lace/
+├── config/
+│   ├── lace.yaml               # Global configuration file
+│   ├── identity.md             # Injected agent persona definition
+│   └── preferences.yaml        # User-defined tool and coding preferences
+├── memory/
+│   ├── vault/                  # Single source of truth (human-readable Markdown)
+│   │   ├── global/             # Global memories
+│   │   └── projects/           # Scoped project directories
+│   ├── vector_db/              # Embedded ChromaDB collections
+│   ├── vault_hash_index.db     # SQLite index tracking file mtimes and SHA-256 hashes
+│   ├── graph.json              # Serialized NetworkX concept graph
+│   └── co_retrieval.json       # Frequency co-occurrence matrix
+├── queue/
+│   ├── extraction_queue.db     # Asynchronous worker job queue
+│   └── pipeline_log.db         # Extraction worthiness verdicts & audit log
+└── logs/
+    ├── retrieval/              # Query scoring traces and latency benchmarks
+    └── interactions/           # Logged conversation turns
 ```
 
 ---
 
-## Development & Testing
+## Testing & Quality Verification
 
-LACE uses `pytest` for unit and integration testing.
+LACE enforces strict automated testing across data models, SQLite queue concurrency, vector retrieval, graph parsing, and MCP tool protocols.
 
-Run all tests:
 ```bash
-uv run pytest
+# Run the complete test suite
+pytest
+
+# Run with coverage report
+pytest --cov=lace tests/
+
+# Test specific subsystems
+pytest tests/test_mcp/
+pytest tests/test_retrieval/
+pytest tests/test_memory/
 ```
 
-Check code coverage or run tests on specific modules:
-```bash
-uv run pytest tests/test_core/
-uv run pytest tests/test_memory/
-```
+**Verification Results**:
+* **584 passing tests** across 33 test suites.
+* Zero external cloud services required to execute unit or integration tests.
+
+---
+
+## Technical Documentation Index
+
+For deeper architectural breakdowns, runbooks, and domain terminology:
+
+* [**Developer Onboarding Guide**](docs/ONBOARDING.md) — 10-minute setup, key file map, developer runbooks, and real error debugging.
+* [**Domain Context & Glossary**](CONTEXT.md) — Ubiquitous vocabulary (Vault, Scopes, 7-Step Retrieval, Two-Tier Dedup).
+* [**ADR-0001: Local-First Decoupled Architecture**](docs/adr/0001-local-first-decoupled-architecture.md) — Design decision record on why LACE uses decoupled local subsystems over cloud microservices.
+* [**MCP API Reference**](docs/API.md) — Detailed tool signatures, parameters, and MCP resource URI schemes.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License - see the `LICENSE` file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

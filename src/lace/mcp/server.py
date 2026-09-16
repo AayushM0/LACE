@@ -515,6 +515,9 @@ async def run_server(debug: bool = False) -> None:
     # Load the model in a background thread so the client's handshake doesn't timeout.
     def pre_warm():
         try:
+            import time
+            # Give the main thread/event loop a few seconds to complete the handshake
+            time.sleep(5)
             from lace.core.config import load_config, get_lace_home
             from lace.retrieval.embeddings import get_model
             config = load_config(get_lace_home())
